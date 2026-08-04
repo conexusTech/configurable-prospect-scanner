@@ -49,6 +49,11 @@ from aeo.context_refs import resolve as _resolve_refs  # noqa: E402
 from aeo.event_mapping import map_event  # noqa: E402
 from aeo.phases.contacts import find_contacts, merge_into_scored  # noqa: E402
 from aeo.phases.validation import surviving_ids, validate_prospects  # noqa: E402
+from aeo.phases.zip_discovery import (  # noqa: E402
+    DEFAULT_MAX_ZIPS_PER_MARKET,
+    discover_zips,
+    zips_as_markets,
+)
 
 
 def resolve_context_refs(aeo_context: dict[str, Any]) -> dict[str, Any]:
@@ -191,11 +196,18 @@ def _log(message: str) -> None:
 
 
 #: The phases this runtime can execute, in execution order.
+PHASE_ZIP_DISCOVERY = "zip_discovery"
 PHASE_DISCOVERY = "discovery"
 PHASE_VALIDATION = "validation"
 PHASE_CONTACTS = "contacts"
 PHASE_SCORING = "scoring"
-ALL_PHASES = (PHASE_DISCOVERY, PHASE_VALIDATION, PHASE_CONTACTS, PHASE_SCORING)
+ALL_PHASES = (
+    PHASE_ZIP_DISCOVERY,
+    PHASE_DISCOVERY,
+    PHASE_VALIDATION,
+    PHASE_CONTACTS,
+    PHASE_SCORING,
+)
 
 
 def selected_phases(raw: str | None) -> list[str]:
@@ -321,6 +333,38 @@ def main() -> int:
     config = (aeo_context.get("skill") or {}).get("config") or {}
 
     try:
+        # ── zip discovery (Phase 0) ───────────────────────────────────────
+        # Runs before discovery because its output can widen the search geography.
+        if PHASE_ZIP_DISCOVERY in phases:
+            targeting = (config.get("geography") or {}).get("targeting") or {}
+            zip_rows = discover_zips(
+                aeo_context.get("geography") or {},
+                provider=provider,
+                provider_config=provider_config,
+                parse_json_array=als.parse_json_array,
+                max_per_market=int(
+                    targeting.get("max_zips_per_market", DEFAULT_MAX_ZIPS_PER_MARKET)
+                ),
+                emit=sink.emit,
+            )
+            if zip_rows:
+                sink.emit({"type": "zip_codes", "items": zip_rows})
+
+            # Recording the fan-out is cheap; SEARCHING it is not — a market
+            # expanding to 15 zips multiplies every discovery query by 15. So acting
+            # on the zips is a separate, explicit opt-in.
+            if targeting.get("use_zip_discovery"):
+                cap = int(targeting.get("max_search_zips", 10))
+                markets = zips_as_markets(zip_rows, cap)
+                if markets:
+                    tool_context["organization"]["markets"] = markets
+                    _log(f"discovery will search {len(markets)} zip-derived market(s)")
+            elif zip_rows:
+                _log(
+                    f"recorded {len(zip_rows)} zip(s) but NOT searching them "
+                    f"(geography.targeting.use_zip_discovery is not set)"
+                )
+
         prospects = als.discover(
             tool_context,
             scan_run_id=scan_run_id,

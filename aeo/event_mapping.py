@@ -158,6 +158,20 @@ def map_scored_event(event: dict[str, Any]) -> list[dict[str, Any]]:
     return [{"data": batch} for batch in _chunk(mapped)]
 
 
+def map_zip_codes_event(event: dict[str, Any]) -> list[dict[str, Any]]:
+    """Zip-discovery event → one or more AEO `zip_codes` payloads.
+
+    Rows arrive already validated and shaped by `aeo/phases/zip_discovery.py` — only
+    `zip_code` is required, so a row without one is dropped rather than sent to a 400.
+    """
+    mapped = [
+        item
+        for item in (event.get("items") or [])
+        if isinstance(item, dict) and item.get("zip_code")
+    ]
+    return [{"data": batch} for batch in _chunk(mapped)]
+
+
 def map_validations_event(event: dict[str, Any]) -> list[dict[str, Any]]:
     """Validation-phase event → one or more AEO `validations` payloads.
 
@@ -190,6 +204,8 @@ def map_event(event: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
         return [("scored", p) for p in map_scored_event(event)]
     if etype == "validations":
         return [("validations", p) for p in map_validations_event(event)]
+    if etype == "zip_codes":
+        return [("zip_codes", p) for p in map_zip_codes_event(event)]
     if etype == "completed":
         # Only the four counters AEO's ScanCompletedSummaryDto declares. Anything
         # else (e.g. the engine's provider name) is dropped rather than sent: the
