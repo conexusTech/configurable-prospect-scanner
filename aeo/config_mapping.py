@@ -231,9 +231,61 @@ def build_tool_context(
         "product_description": product_description,
         "gemini": {**DEFAULT_PROVIDER, **(provider or {})},
         "output": {"path": output_path, "top_n": top_n},
-        "sources": _with_geo_strict_prompt(sources, product_description),
+        "sources": _with_geo_strict_prompt(
+            # Order matters only for readability; both are pure. The fan-out runs on
+            # the RESOLVED config, so `lookalike_sources` arrives as the org's real
+            # customer list rather than as a `context_ref` binding.
+            fan_out_seed_firms(sources, (config.get("discovery") or {}).get("lookalike_sources")),
+            product_description,
+        ),
         "scoring": scoring,
     }
+
+
+def fan_out_seed_firms(
+    sources: dict[str, Any], lookalike_sources: Any
+) -> dict[str, Any]:
+    """Populate every source's `seed_firms` from the R12-bound `lookalike_sources`.
+
+    **This closes a library-invariant hole, and it is the reason `seed_firms` must
+    never be authored.** Seed firms are the commissioning org's own existing customers
+    — org-specific by definition. Authored as a literal inside `discovery.sources` they
+    passed the config schema (section internals are `additionalProperties: true`),
+    passed R12's binding checks (not an enumerated position), and finalized — after
+    which **the next org to connect that skill would search using the first org's
+    customer list.** Found by aeo-agent-service reading this repo (thread #17).
+
+    The fix is deliberately split across the two places that can each only do half:
+    aeo-backend's lint now **rejects** an authored `seed_firms`, and this fans the
+    bound value in at scan time so the capability survives. A fan-out alone would have
+    left the hole open for anyone who authored the literal anyway.
+
+    Fanning to *every* source is correct rather than lazy: the engine renders seed firms
+    as "do NOT return these; find ADDITIONAL firms", and an org's existing customers
+    should be excluded from every source, not just one.
+    """
+    if not lookalike_sources:
+        return sources
+
+    if isinstance(lookalike_sources, list):
+        firms = [str(v).strip() for v in lookalike_sources if str(v).strip()]
+    else:
+        text = str(lookalike_sources).strip()
+        firms = [text] if text else []
+    if not firms:
+        return sources
+
+    out: dict[str, Any] = {}
+    for name, source in sources.items():
+        if not isinstance(source, dict):
+            out[name] = source
+            continue
+        # Union rather than overwrite, and order-preserving: a source may legitimately
+        # carry runtime-populated firms from an earlier step in future.
+        existing = [str(v) for v in (source.get("seed_firms") or [])]
+        merged = existing + [f for f in firms if f not in existing]
+        out[name] = {**source, "seed_firms": merged}
+    return out
 
 
 def _with_geo_strict_prompt(

@@ -178,3 +178,38 @@ class TestGeoStrictPrompt:
         ctx["skill"]["config"]["discovery"]["sources"]["church_architects"]["prompt"] = "MINE {query}{n}{seed_context}"
         out = build_tool_context(ctx)
         assert out["sources"]["church_architects"]["prompt"].startswith("MINE")
+
+
+class TestSeedFirmFanOut:
+    """Closes the library-invariant hole agent-service found (thread #17)."""
+
+    def test_fans_the_bound_lookalike_sources_into_every_source(self):
+        # Seed firms are the org's own customers. Authored as a literal inside
+        # discovery.sources they passed schema + lint + finalize, and the NEXT org to
+        # connect the skill would have searched using the FIRST org's customer list.
+        ctx = _context()
+        ctx["skill"]["config"]["discovery"]["lookalike_sources"] = ["First Baptist", "Grace"]
+        ctx["skill"]["config"]["discovery"]["sources"]["second"] = {
+            "name_field": "f", "fields": ["f"], "queries": ["q"],
+        }
+        out = build_tool_context(ctx)
+        for name in ("church_architects", "second"):
+            assert out["sources"][name]["seed_firms"] == ["First Baptist", "Grace"], name
+
+    def test_unions_rather_than_overwrites_existing_seeds(self):
+        ctx = _context()
+        ctx["skill"]["config"]["discovery"]["lookalike_sources"] = ["New Co"]
+        ctx["skill"]["config"]["discovery"]["sources"]["church_architects"]["seed_firms"] = ["Kept"]
+        out = build_tool_context(ctx)
+        assert out["sources"]["church_architects"]["seed_firms"] == ["Kept", "New Co"]
+
+    def test_no_lookalike_sources_leaves_sources_alone(self):
+        out = build_tool_context(_context())
+        assert out["sources"]["church_architects"].get("seed_firms") == []
+
+    def test_accepts_a_scalar_lookalike_value(self):
+        # The org's onboarding blob is free-form; a single string is a real shape.
+        ctx = _context()
+        ctx["skill"]["config"]["discovery"]["lookalike_sources"] = "Only One"
+        out = build_tool_context(ctx)
+        assert out["sources"]["church_architects"]["seed_firms"] == ["Only One"]
