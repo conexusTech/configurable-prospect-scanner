@@ -158,6 +158,23 @@ def map_scored_event(event: dict[str, Any]) -> list[dict[str, Any]]:
     return [{"data": batch} for batch in _chunk(mapped)]
 
 
+def map_validations_event(event: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validation-phase event → one or more AEO `validations` payloads.
+
+    `ScanValidationItemDto` is just `{prospect_id, validation_data?}` — the verdict
+    shape is ours to define, and it is pinned in `aeo/phases/validation.py`.
+    """
+    mapped = []
+    for item in event.get("items") or []:
+        if not isinstance(item, dict) or not item.get("prospect_id"):
+            continue
+        out: dict[str, Any] = {"prospect_id": item["prospect_id"]}
+        if isinstance(item.get("validation_data"), dict):
+            out["validation_data"] = item["validation_data"]
+        mapped.append(out)
+    return [{"data": batch} for batch in _chunk(mapped)]
+
+
 def map_event(event: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     """Engine event → list of (aeo_event_type, payload) to POST, in order.
 
@@ -171,6 +188,8 @@ def map_event(event: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
         return [("prospects", p) for p in map_prospects_event(event)]
     if etype == "scored":
         return [("scored", p) for p in map_scored_event(event)]
+    if etype == "validations":
+        return [("validations", p) for p in map_validations_event(event)]
     if etype == "completed":
         # Only the four counters AEO's ScanCompletedSummaryDto declares. Anything
         # else (e.g. the engine's provider name) is dropped rather than sent: the
