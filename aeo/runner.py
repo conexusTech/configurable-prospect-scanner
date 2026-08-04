@@ -47,6 +47,7 @@ from aeo.config_mapping import (  # noqa: E402
 from aeo.context_refs import UnresolvedRefError  # noqa: E402
 from aeo.context_refs import resolve as _resolve_refs  # noqa: E402
 from aeo.event_mapping import map_event  # noqa: E402
+from aeo.modules.loader import load_modules  # noqa: E402
 from aeo.phases.contacts import find_contacts, merge_into_scored  # noqa: E402
 from aeo.phases.validation import surviving_ids, validate_prospects  # noqa: E402
 from aeo.phases.zip_discovery import (  # noqa: E402
@@ -331,6 +332,32 @@ def main() -> int:
     today = als._resolve_today(None)
 
     config = (aeo_context.get("skill") or {}).get("config") or {}
+
+    # R11 — load reviewed custom modules. Returns [] at launch (D5), so this is a
+    # no-op today; it runs anyway so the gate is exercised by every real scan rather
+    # than only by its unit tests.
+    #
+    # ⚠️ Loading is wired; APPLYING is not, and that is deliberate rather than
+    # unfinished. Two things must exist first, and neither is ours alone to decide:
+    #   1. `custom_modules` has no home in the ratified config — root is
+    #      `additionalProperties: false`, so a config carrying it is rejected at
+    #      finalize. Adding it is a coordinated schema bump.
+    #   2. Where a module's signals PERSIST is undecided. The engine emits its
+    #      `prospects` event during discovery, before modules could contribute, so
+    #      either signals ride a second (upsert) event or they need their own column.
+    #      Guessing at upsert semantics is how the last four defects happened.
+    # `aeo.modules.apply.apply_modules` ships tested, so turning R11 on is a small
+    # reviewable change rather than a design exercise.
+    custom_modules = load_modules(
+        config.get("custom_modules"),
+        base_dir=Path(__file__).resolve().parent.parent / "modules_data",
+        on_reject=lambda name, reason: _log(f"custom module {name}: {reason}"),
+    )
+    if custom_modules:
+        _log(
+            f"loaded {len(custom_modules)} custom module(s) — NOT applied; see the "
+            f"R11 note in runner.py"
+        )
 
     try:
         # ── zip discovery (Phase 0) ───────────────────────────────────────
