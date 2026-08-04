@@ -225,16 +225,34 @@ def rejection_summary(
 def zips_as_markets(rows: list[dict[str, Any]], cap: int) -> list[str]:
     """Zip rows → market strings the discovery sweep can search.
 
-    `"78701, Austin, TX"` rather than a bare zip: the engine substitutes these into
-    natural-language search queries, and a bare number grounds far worse than a zip
-    with its city attached.
+    **Distinct cities, not individual ZIPs — and that distinction was learned the
+    hard way.** The first version emitted `"78701, Austin, TX"` per zip. Combined with
+    strict geographic prompting, a live run then returned **zero** prospects: a ZIP is
+    a few square miles, and a firm serving a whole metro is not located in every one
+    of them. The narrow query was technically respected and practically useless.
+
+    A ZIP is the right unit for **verifying** a result's location (`geo_filter` matches
+    on them) and the wrong unit for **finding** one. So searching happens at city
+    level, where firms actually are, and enforcement still holds the boundary the zips
+    describe. Deduped, because ten zips across one city is one search, not ten.
+
+    `cap` therefore bounds distinct *cities*, not rows.
     """
+    seen: set[str] = set()
     out: list[str] = []
-    for row in rows[: max(cap, 0)]:
-        parts = [row["zip_code"]]
-        if row.get("city"):
-            parts.append(str(row["city"]))
-        if row.get("state"):
-            parts.append(str(row["state"]))
-        out.append(", ".join(parts))
+    for row in rows:
+        city = str(row.get("city") or "").strip()
+        state = str(row.get("state") or "").strip()
+        if not city:
+            # No city to search with — the bare zip is a poor query but better than
+            # dropping the area entirely.
+            market = str(row.get("zip_code") or "").strip()
+        else:
+            market = f"{city}, {state}".strip(", ")
+        if not market or market.lower() in seen:
+            continue
+        seen.add(market.lower())
+        out.append(market)
+        if len(out) >= max(cap, 0):
+            break
     return out

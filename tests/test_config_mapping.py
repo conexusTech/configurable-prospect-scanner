@@ -146,3 +146,35 @@ class TestPhaseCoverage:
     def test_ignores_an_empty_unsupported_section(self):
         # An empty section is an artefact of drafting, not an authored intent.
         assert unsupported_authored_sections(_context(validation={})) == []
+
+
+class TestGeoStrictPrompt:
+    """The soft half of the geography fix — see GEO_STRICT_PROMPT."""
+
+    def test_injects_a_strict_prompt_when_the_source_has_none(self):
+        # The engine's own default mentions the market in one line among several,
+        # and measured live that lost to big-metro search ranking three runs running.
+        out = build_tool_context(_context())
+        prompt = out["sources"]["church_architects"]["prompt"]
+        assert "STRICT LOCATION REQUIREMENT" in prompt
+
+    def test_leaves_the_engines_placeholders_intact(self):
+        # The engine formats with query/n/seed_context. Substituting those here, or
+        # leaving a {keys} behind, is a KeyError at format time.
+        prompt = build_tool_context(_context())["sources"]["church_architects"]["prompt"]
+        for placeholder in ("{query}", "{n}", "{seed_context}"):
+            assert placeholder in prompt
+        assert "{keys}" not in prompt and "{product_description}" not in prompt
+        assert prompt.format(query="q", n=3, seed_context="")
+
+    def test_permits_returning_FEWER_results(self):
+        # As load-bearing as the instruction: "return EXACTLY n" pressures a model to
+        # pad a thin area with plausible out-of-area names.
+        prompt = build_tool_context(_context())["sources"]["church_architects"]["prompt"]
+        assert "FEWER" in prompt
+
+    def test_never_overrides_an_authored_prompt(self):
+        ctx = _context()
+        ctx["skill"]["config"]["discovery"]["sources"]["church_architects"]["prompt"] = "MINE {query}{n}{seed_context}"
+        out = build_tool_context(ctx)
+        assert out["sources"]["church_architects"]["prompt"].startswith("MINE")

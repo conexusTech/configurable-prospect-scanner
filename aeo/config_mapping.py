@@ -46,6 +46,46 @@ DEFAULT_PROVIDER = {
 }
 
 
+#: Injected as a source's `prompt` when the authored config does not supply one.
+#:
+#: **Why this is not just wording.** The engine's default prompt mentions the market
+#: only inside `Search for: {query}` — one line among several, weighted against
+#: whatever else grounded search surfaces. Measured live: Austin and Round Rock zips
+#: went in, *Dallas* firms came out, three runs in a row. Big-metro firms outrank
+#: small-town ones in search, so the drift is systematic rather than random.
+#:
+#: With the location requirement stated first, named as the primary filter, and paired
+#: with explicit permission to return FEWER results, the same model returned Austin
+#: firms for Austin zips and Round Rock firms for Round Rock zips. The permission
+#: matters as much as the instruction: "return EXACTLY {n}" pressures a model to pad
+#: a thin area with plausible out-of-area names.
+#:
+#: This is the soft half of the fix. `aeo/phases/geo_filter.py` is the guarantee —
+#: prompts persuade, verification enforces, and only one of those is reliable.
+#:
+#: An authored source that defines its own `prompt` keeps it; this only fills a gap.
+GEO_STRICT_PROMPT = """You are a research analyst finding prospects for the following business:
+
+{product_description}
+
+Search for: {query}
+
+**STRICT LOCATION REQUIREMENT — apply this before anything else.** The search text
+above names a specific area. Return ONLY organizations whose own business address is
+in that city or its immediate suburbs. Do NOT return firms headquartered in other
+metropolitan areas, however well known or otherwise well matched. If you cannot find
+{n} organizations in that area, return FEWER — an empty array is a correct answer
+when the area genuinely has none.
+
+For each result gather the fields listed below. Be accurate; leave a field blank
+rather than guessing.
+{seed_context}
+Return AT MOST {n} results as a JSON array. Each object must have these keys:
+{keys}
+
+Return ONLY the JSON array, no other text."""
+
+
 class UnmappedConfigError(ValueError):
     """A config section the engine needs is missing or not expressible.
 
@@ -191,9 +231,41 @@ def build_tool_context(
         "product_description": product_description,
         "gemini": {**DEFAULT_PROVIDER, **(provider or {})},
         "output": {"path": output_path, "top_n": top_n},
-        "sources": sources,
+        "sources": _with_geo_strict_prompt(sources, product_description),
         "scoring": scoring,
     }
+
+
+def _with_geo_strict_prompt(
+    sources: dict[str, Any], product_description: str
+) -> dict[str, Any]:
+    """Give every source a geographically-strict prompt unless it authored its own.
+
+    The engine reads `source_cfg["prompt"]` and falls back to its own template, whose
+    location handling is too weak to hold (see GEO_STRICT_PROMPT). Filling the gap
+    here rather than asking every config author to remember means the default
+    behaviour is the correct one.
+
+    `product_description` and `keys` are substituted now because the engine only
+    passes `{query}`, `{n}` and `{seed_context}` to an authored template — a
+    `{keys}` left in it would raise `KeyError` at format time.
+    """
+    out: dict[str, Any] = {}
+    for name, source in sources.items():
+        if not isinstance(source, dict):
+            out[name] = source
+            continue
+        if source.get("prompt"):
+            out[name] = source
+            continue
+        fields = source.get("fields") or ["organization_name", "city", "state"]
+        out[name] = {
+            **source,
+            "prompt": GEO_STRICT_PROMPT.replace(
+                "{product_description}", product_description or "(not specified)"
+            ).replace("{keys}", ", ".join(str(f) for f in fields)),
+        }
+    return out
 
 
 # ── What this mapping does NOT cover, stated rather than silently dropped ────

@@ -160,12 +160,25 @@ class TestDedupeAndCaps:
 
 
 class TestZipsAsMarkets:
-    def test_renders_zip_with_city_and_state_for_grounding(self):
-        # A bare number grounds far worse than a zip with its city attached.
+    def test_searches_by_CITY_not_by_individual_zip(self):
+        # Learned live: per-zip queries plus strict geography returned ZERO prospects.
+        # A zip is a few square miles; a firm serving a metro is not in every one. The
+        # zip is the right unit for VERIFYING a location, the wrong one for finding it.
         out = zips_as_markets([{"zip_code": "78701", "city": "Austin", "state": "TX"}], 10)
-        assert out == ["78701, Austin, TX"]
+        assert out == ["Austin, TX"]
+
+    def test_dedupes_many_zips_in_one_city_into_one_search(self):
+        rows = [{"zip_code": f"7870{i}", "city": "Austin", "state": "TX"} for i in range(5)]
+        assert zips_as_markets(rows, 10) == ["Austin, TX"]
+
+    def test_cap_bounds_distinct_cities(self):
+        rows = [{"zip_code": "1", "city": "Austin", "state": "TX"},
+                {"zip_code": "2", "city": "Round Rock", "state": "TX"},
+                {"zip_code": "3", "city": "Georgetown", "state": "TX"}]
+        assert zips_as_markets(rows, 2) == ["Austin, TX", "Round Rock, TX"]
 
     def test_falls_back_to_the_bare_zip_when_city_is_unknown(self):
+        # A poor query, but better than dropping the area entirely.
         assert zips_as_markets([{"zip_code": "78701"}], 10) == ["78701"]
 
     def test_respects_the_search_cap(self):

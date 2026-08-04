@@ -50,6 +50,11 @@ from aeo.bootstrap import BootstrapError, bootstrap  # noqa: E402
 from aeo.event_mapping import map_event  # noqa: E402
 from aeo.modules.loader import load_modules  # noqa: E402
 from aeo.phases.contacts import find_contacts, merge_into_scored  # noqa: E402
+from aeo.phases.geo_filter import (  # noqa: E402
+    STRICTNESS_METRO,
+    build_target_area,
+    geographic_verdicts,
+)
 from aeo.phases.validation import surviving_ids, validate_prospects  # noqa: E402
 from aeo.phases.zip_discovery import (  # noqa: E402
     DEFAULT_MAX_ZIPS_PER_MARKET,
@@ -353,6 +358,9 @@ def main() -> int:
 
     config = (aeo_context.get("skill") or {}).get("config") or {}
 
+    # Declared up front: geographic enforcement reads this whether or not Phase 0 ran.
+    zip_rows: list[dict[str, Any]] = []
+
     # R11 — load reviewed custom modules. Returns [] at launch (D5), so this is a
     # no-op today; it runs anyway so the gate is exercised by every real scan rather
     # than only by its unit tests.
@@ -384,7 +392,7 @@ def main() -> int:
         # Runs before discovery because its output can widen the search geography.
         if PHASE_ZIP_DISCOVERY in phases:
             targeting = (config.get("geography") or {}).get("targeting") or {}
-            zip_rows = discover_zips(
+            zip_rows[:] = discover_zips(
                 aeo_context.get("geography") or {},
                 provider=provider,
                 provider_config=provider_config,
@@ -420,21 +428,64 @@ def main() -> int:
             provider_config=provider_config,
         )
 
+        # ── geographic enforcement ────────────────────────────────────────
+        #
+        # Verify, don't ask. The market only reaches the discovery prompt as words
+        # inside the query, so the model can weigh it against whatever else its
+        # search surfaces — observed live: Austin/Round Rock zips in, Dallas firms
+        # out. This is deterministic and runs whether or not validation does.
+        #
+        # A mismatch is expressed as a `validations` verdict rather than a local
+        # filter: the engine already emitted these prospects during discovery, so
+        # they exist in AEO regardless, and a rejected row with a stated reason is
+        # more useful than a row with no explanation.
+        area = build_target_area(zip_rows, tool_context["organization"].get("markets"))
+        geo_rejects: list[dict[str, Any]] = []
+        if area.is_empty:
+            _log("geography unknown — enforcement skipped (would reject everything)")
+        else:
+            strictness = str(
+                (config.get("geography") or {})
+                .get("targeting", {})
+                .get("geo_strictness", STRICTNESS_METRO)
+            )
+            geo_rejects = geographic_verdicts(prospects, area, strictness=strictness)
+            if geo_rejects:
+                _log(
+                    f"{len(geo_rejects)}/{len(prospects)} prospect(s) fell OUTSIDE the "
+                    f"target area ({area.describe()}) — the model ignored the requested "
+                    f"geography"
+                )
+
         # ── validation ────────────────────────────────────────────────────
+        validations: list[dict[str, Any]] = []
         if PHASE_VALIDATION in phases and config.get("validation"):
+            # Signal validation only runs on prospects that are geographically
+            # valid — judging in-market signals for a firm in the wrong state is a
+            # model call spent to reach a conclusion already known.
+            geo_rejected_ids = {v["prospect_id"] for v in geo_rejects}
             validations = validate_prospects(
-                prospects,
+                [p for p in prospects if p.get("id") not in geo_rejected_ids],
                 validation_config=config["validation"],
                 provider=provider,
                 provider_config=provider_config,
                 parse_json_array=als.parse_json_array,
                 emit=sink.emit,
             )
-            sink.emit({"type": "validations", "items": validations})
-            keep = surviving_ids(validations)
+
+        # One `validations` emission covering both kinds of rejection, so AEO sees a
+        # single coherent verdict per prospect rather than two competing ones.
+        all_verdicts = geo_rejects + validations
+        if all_verdicts:
+            sink.emit({"type": "validations", "items": all_verdicts})
+            keep = surviving_ids(all_verdicts)
+            judged = {v["prospect_id"] for v in all_verdicts}
             before = len(prospects)
-            prospects = [p for p in prospects if p.get("id") in keep]
-            _log(f"validation kept {len(prospects)}/{before} prospects")
+            # Unjudged prospects are kept — same rule as validation's own.
+            prospects = [
+                p for p in prospects if p.get("id") not in judged or p.get("id") in keep
+            ]
+            _log(f"kept {len(prospects)}/{before} prospects after geography + validation")
 
         scored = als.score_prospects(prospects, tool_context, today=today)
 
