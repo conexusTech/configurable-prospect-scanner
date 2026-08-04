@@ -50,6 +50,42 @@ rather than defaults** whenever the authored recipe cannot drive a real scan —
 because a default discovery strategy is not a smaller feature, it is a wrong answer
 wearing a confident face.
 
+## Events out: `aeo/event_mapping.py`
+
+The mirror of the config mapping. Verified field-by-field against aeo-backend's
+`scan-event.dto.ts`, and the good news is that the hard parts already agree: the
+engine's prospect `id` is a `uuid5` of `(scan_run_id, normalised name)`, which is
+exactly AEO's "skill-generated, stable on retry"; `discovery_data` is already an
+object, matching migration 071; and `prospect_id` / `contact_name` / `score` /
+`rank` / `score_factors` map 1:1 on the scored event.
+
+Three things a pass-through gets wrong, all of them total failures rather than
+partial ones:
+
+- **`phase` / `phase_name` are per-ITEM in AEO, per-EVENT in the engine.** Unmapped,
+  every prospect in the sweep fails validation.
+- **AEO caps an event at 1000 items**; the engine emits one event per sweep. Over the
+  cap the whole callback 400s and the sweep is lost, not truncated.
+- **`pipeline_status` is a name collision** — see below.
+
+Undeclared fields are folded into `scoring_payload` rather than dropped: the
+engine's vertical-shaped extras (`denomination`, `campaign_goal`, `project_type`)
+are real signal, they just are not columns.
+
+### ⚠️ `pipeline_status` — do not connect these two fields
+
+The engine emits `pipeline_status` from `calculate_pipeline()`: a **construction
+project** stage inferred from timeline arithmetic ("in campaign", "breaking
+ground"). AEO's `prospects.pipeline_status` is the **sales** pipeline workflow an
+operator drives by hand via `PATCH /prospects/:id/pipeline-status`.
+
+Same name, unrelated meanings. Mapping one onto the other silently overwrites
+operator sales state with construction strings on every scan, with nothing erroring.
+It stays inside `scoring_payload`, and a test asserts it never travels top-level.
+
+This is the sixth name collision this feature has produced. The other five each cost
+a defect.
+
 ### Known gaps, stated rather than discovered later
 
 - **`discovery.sources` is a proposal.** The Skill Builder's config schema leaves

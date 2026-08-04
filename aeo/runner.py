@@ -43,6 +43,7 @@ from aeo.config_mapping import (  # noqa: E402
     build_tool_context,
     unsupported_authored_sections,
 )
+from aeo.event_mapping import map_event  # noqa: E402
 
 
 def _auth_headers() -> dict[str, str]:
@@ -81,9 +82,11 @@ def post_event(
 class AeoEventSink(als.Sink):
     """Forwards the engine's event stream to AEO's durable callback.
 
-    `prospects` / `scored` / `completed` / `error` map 1:1 onto POST types.
-    Per-source progress is logged only — it is high-frequency and AEO has no
-    durable destination for it.
+    Every event goes through `aeo.event_mapping` rather than being posted as-is.
+    A pass-through fails: AEO wants `phase`/`phase_name` on each ITEM while the
+    engine puts them on the EVENT, and AEO caps an event at 1000 items while the
+    engine emits one event for a whole discovery sweep. Both failures are total —
+    a 400 loses the entire sweep, not the offending part.
     """
 
     def __init__(self, backend_url: str, scan_run_id: str) -> None:
@@ -92,22 +95,23 @@ class AeoEventSink(als.Sink):
 
     def emit(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
-        if etype in ("prospects", "scored"):
-            items = event.get("items", [])
-            post_event(self._backend, self._scan, etype, {"items": items})
-            _log(f"forwarded {etype}: {len(items)}")
-        elif etype == "completed":
-            post_event(
-                self._backend, self._scan, "completed", {"summary": event.get("summary", {})}
-            )
-            _log("forwarded completed")
-        elif etype == "error":
-            post_event(
-                self._backend, self._scan, "error", {"message": event.get("message", "")}
-            )
-            _log(f"forwarded error: {event.get('message')}")
-        elif etype in ("phase_start", "phase_complete"):
+
+        # Progress events are legitimately high-frequency and have no durable AEO
+        # destination — logged, never posted.
+        if etype in ("phase_start", "phase_complete"):
             _log(f"progress {etype} phase={event.get('phase')} count={event.get('count', '')}")
+            return
+
+        posts = map_event(event)
+        if not posts:
+            _log(f"no AEO destination for event type {etype!r} — not forwarded")
+            return
+
+        for aeo_type, payload in posts:
+            post_event(self._backend, self._scan, aeo_type, payload)
+        count = sum(len(p.get("items", [])) for _, p in posts)
+        suffix = f" in {len(posts)} batches" if len(posts) > 1 else ""
+        _log(f"forwarded {etype}: {count} item(s){suffix}")
 
 
 def _log(message: str) -> None:
