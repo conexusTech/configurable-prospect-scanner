@@ -53,7 +53,13 @@ from aeo.phases.contacts import find_contacts, merge_into_scored  # noqa: E402
 from aeo.phases.geo_filter import (  # noqa: E402
     STRICTNESS_METRO,
     build_target_area,
-    geographic_verdicts,
+)
+from aeo.phases.geo_loop import DEFAULT_MAX_ROUNDS, discover_in_area  # noqa: E402
+from aeo.phases.query_expansion import (  # noqa: E402
+    DEFAULT_MAX_QUERIES_PER_SOURCE,
+    MARKET_PLACEHOLDER,
+    expand_queries,
+    unexpanded_placeholders,
 )
 from aeo.phases.validation import surviving_ids, validate_prospects  # noqa: E402
 from aeo.phases.zip_discovery import (  # noqa: E402
@@ -413,49 +419,92 @@ def main() -> int:
                 markets = zips_as_markets(zip_rows, cap)
                 if markets:
                     tool_context["organization"]["markets"] = markets
-                    _log(f"discovery will search {len(markets)} zip-derived market(s)")
+                    _log(f"zip discovery yielded {len(markets)} market(s) to search")
             elif zip_rows:
                 _log(
                     f"recorded {len(zip_rows)} zip(s) but NOT searching them "
                     f"(geography.targeting.use_zip_discovery is not set)"
                 )
 
-        prospects = als.discover(
-            tool_context,
-            scan_run_id=scan_run_id,
-            provider=provider,
-            emit=sink.emit,
-            provider_config=provider_config,
+        # Geography as a loop condition, not an instruction. Prompting proved
+        # unreliable — identical prompt/image/config gave in-area results standalone
+        # and out-of-area results in-container — so candidates are verified against
+        # the target area and discovery re-runs (excluding what it already found)
+        # until enough of them are genuinely in it. See aeo/phases/geo_loop.py.
+        markets = tool_context["organization"].get("markets") or []
+        area = build_target_area(zip_rows, markets)
+        strictness = str(
+            (config.get("geography") or {})
+            .get("targeting", {})
+            .get("geo_strictness", STRICTNESS_METRO)
         )
 
-        # ── geographic enforcement ────────────────────────────────────────
-        #
-        # Verify, don't ask. The market only reaches the discovery prompt as words
-        # inside the query, so the model can weigh it against whatever else its
-        # search surfaces — observed live: Austin/Round Rock zips in, Dallas firms
-        # out. This is deterministic and runs whether or not validation does.
-        #
-        # A mismatch is expressed as a `validations` verdict rather than a local
-        # filter: the engine already emitted these prospects during discovery, so
-        # they exist in AEO regardless, and a rejected row with a stated reason is
-        # more useful than a row with no explanation.
-        area = build_target_area(zip_rows, tool_context["organization"].get("markets"))
-        geo_rejects: list[dict[str, Any]] = []
-        if area.is_empty:
-            _log("geography unknown — enforcement skipped (would reject everything)")
-        else:
-            strictness = str(
+        # THE ROOT CAUSE OF THE DRIFT, fixed here. The engine hands `queries` to the
+        # model verbatim and never substitutes `{market}` — it does not read
+        # `organization.markets` during discovery at all. So an authored query reached
+        # the model with the placeholder intact, carrying no geography, and the model
+        # answered with the state's most prominent firms. Expanding it is ours to do
+        # because the markets are not known until zip discovery has run.
+        tool_context["sources"] = expand_queries(
+            tool_context["sources"],
+            markets,
+            max_per_source=int(
                 (config.get("geography") or {})
                 .get("targeting", {})
-                .get("geo_strictness", STRICTNESS_METRO)
+                .get("max_queries_per_source", DEFAULT_MAX_QUERIES_PER_SOURCE)
+            ),
+        )
+        stragglers = unexpanded_placeholders(tool_context["sources"])
+        if stragglers:
+            # A query reaching the model with `{market}` in it returns confident,
+            # well-formed, geographically random results — the most expensive failure
+            # this repo has seen. Say so loudly rather than searching anyway.
+            _log(
+                f"WARNING: {len(stragglers)} query/queries still contain "
+                f"{MARKET_PLACEHOLDER} and will carry NO geography: {stragglers[0]}"
             )
-            geo_rejects = geographic_verdicts(prospects, area, strictness=strictness)
+        else:
+            total = sum(len(s.get("queries") or []) for s in tool_context["sources"].values())
+            _log(f"expanded to {total} geo-anchored query/queries across {len(markets)} market(s)")
+
+        def _discover(ctx: dict[str, Any]) -> list[dict[str, Any]]:
+            return als.discover(
+                ctx,
+                scan_run_id=scan_run_id,
+                provider=provider,
+                emit=sink.emit,
+                provider_config=provider_config,
+            )
+
+        geo_rejects: list[dict[str, Any]] = []
+        if area.is_empty:
+            # Enforcement off: an empty area would reject everything, which is worse
+            # than not enforcing. One plain pass.
+            _log("geography unknown — verify loop skipped (would reject everything)")
+            prospects = _discover(tool_context)
+        else:
+            targeting = (config.get("geography") or {}).get("targeting") or {}
+            prospects, geo_rejects = discover_in_area(
+                tool_context=tool_context,
+                area=area,
+                target_count=int(os.environ.get("SCANNER_TOP_N", "50")),
+                discover=_discover,
+                provider=provider,
+                provider_config=provider_config,
+                parse_json_array=als.parse_json_array,
+                strictness=strictness,
+                max_rounds=int(targeting.get("max_discovery_rounds", DEFAULT_MAX_ROUNDS)),
+                log=_log,
+            )
             if geo_rejects:
                 _log(
-                    f"{len(geo_rejects)}/{len(prospects)} prospect(s) fell OUTSIDE the "
-                    f"target area ({area.describe()}) — the model ignored the requested "
-                    f"geography"
+                    f"{len(geo_rejects)} prospect(s) rejected on VERIFIED address — "
+                    f"outside {area.describe()}"
                 )
+
+        # `geo_rejects` is already populated by the verify loop above — rejections
+        # there carry a VERIFIED address, which is strictly better evidence than the
+        # single-pass check this replaced (that one trusted discovery's own city).
 
         # ── validation ────────────────────────────────────────────────────
         validations: list[dict[str, Any]] = []
