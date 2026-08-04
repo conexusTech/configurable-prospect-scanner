@@ -1,0 +1,134 @@
+{
+  "organization": {
+    "name": "CSD",
+    "markets": ["TX", "CO", "IN"]
+  },
+  "product_description": "Professional AV integration services — sound systems, video walls, lighting, projection, and live streaming — for churches, worship centers, and religious facilities. A church with an active building project (new construction, renovation, expansion) will need professional AV integration within 6-24 months.",
+
+  "gemini": {
+    "model": "gemini-3-flash-preview",
+    "temperature": 0.1,
+    "entries_per_query": 3,
+    "retry_attempts": 3
+  },
+
+  "output": {
+    "path": "av-lead.csd.json",
+    "top_n": 50
+  },
+
+  "sources": {
+    "generosity_consultants": {
+      "name_field": "firm_name",
+      "fields": ["firm_name", "website_url", "linkedin_page", "geographic_focus", "denominations_served", "publishes_clients", "key_consultants", "portfolio_url", "notes"],
+      "queries": [
+        "church capital campaign consulting firm",
+        "church generosity consultant",
+        "stewardship consulting church",
+        "church fundraising campaign consultant",
+        "capital campaign feasibility study church"
+      ],
+      "seed_firms": ["Generis", "Impact Stewardship", "Church Development", "Abundant Giving", "Greater Mission", "Cargill Associates", "CCS Fundraising", "Ascend Stewardship", "GSB Consultants", "Ministry Solutions Group", "Fellowship Development", "Dickerson-Bakker", "RSI (Resource Services Inc.)", "Horizons Stewardship", "James D. Klote & Associates"]
+    },
+
+    "church_architects": {
+      "name_field": "firm_name",
+      "fields": ["firm_name", "website_url", "linkedin_page", "geographic_coverage", "project_types", "publishes_projects", "key_architects", "portfolio_url", "notes"],
+      "queries": [
+        "church architecture firm",
+        "worship space architect",
+        "church design build firm",
+        "house of worship architect",
+        "sanctuary design architect portfolio"
+      ],
+      "seed_firms": ["HH Architects", "Visioneering Studios", "Aspen Group", "Beck Group", "Daniels (Churches by Daniels)", "BGW Architects", "Roth Sheppard Architects", "Manley Design Group", "CDH Partners", "CannonDesign", "Gensler"]
+    },
+
+    "church_construction": {
+      "name_field": "firm_name",
+      "fields": ["firm_name", "website_url", "linkedin_page", "geographic_coverage", "project_types", "publishes_projects", "key_contacts", "portfolio_url", "notes"],
+      "queries": [
+        "church construction company",
+        "church design build contractor",
+        "religious building general contractor",
+        "church building contractor portfolio"
+      ],
+      "seed_firms": ["The McKnight Group", "Crossland Construction", "Lincoln Construction", "Fager-McGee", "W.E. O'Neil Construction", "Hensel Phelps"]
+    },
+
+    "church_lending": {
+      "name_field": "firm_name",
+      "fields": ["firm_name", "website_url", "linkedin_page", "geographic_coverage", "loan_types", "publishes_clients", "key_contacts", "notes"],
+      "queries": [
+        "church construction loan lender",
+        "church mortgage financing",
+        "church building loan",
+        "religious facility financing"
+      ],
+      "seed_firms": ["Ascend Stewardship", "Church Investors Fund", "ECCU (Evangelical Christian Credit Union)", "Griffin Church Loans", "Servant Solutions"]
+    },
+
+    "municipal_permits": {
+      "name_field": "organization_name",
+      "fields": ["organization_name", "project_description", "location_address", "city", "state", "permit_type", "project_phase", "estimated_timeline", "key_contact", "denomination", "av_opportunity_notes"],
+      "queries": [
+        "Dallas Fort Worth city church building permits new construction 2025 2026",
+        "Texas churches with new building permits 2025 2026",
+        "Texas churches building new sanctuaries or expanding 2025 2026",
+        "Texas church new construction permits Dallas Houston San Antonio 2025 2026",
+        "Colorado churches with building permits Denver Colorado Springs 2025 2026",
+        "Colorado church construction expansion renovation permits 2025 2026",
+        "Indiana churches with building permits 2025 2026",
+        "Indianapolis Marion County church construction projects 2025 2026"
+      ],
+      "seed_firms": []
+    },
+
+    "planning_board": {
+      "name_field": "organization_name",
+      "fields": ["organization_name", "project_description", "location_address", "city", "state", "board_meeting_type", "meeting_date", "project_phase", "key_contact", "denomination", "av_opportunity_notes"],
+      "queries": [
+        "Dallas Fort Worth planning board approving church construction 2025 2026",
+        "Texas planning commission church construction approvals Houston San Antonio Austin 2025 2026",
+        "Texas conditional use permits for churches 2025 2026",
+        "Denver Colorado Springs planning board church approvals 2025 2026",
+        "Colorado church site plan reviews 2025 2026",
+        "Indianapolis Fort Wayne Indiana planning board church approvals 2025 2026",
+        "planning board approvals for new church construction or expansion 2025 2026",
+        "recently approved church site plans and building permits 2025 2026"
+      ],
+      "seed_firms": []
+    },
+
+    "active_campaigns": {
+      "name_field": "organization_name",
+      "fields": ["organization_name", "project_description", "location", "city", "state", "campaign_name", "campaign_goal", "amount_raised", "project_type", "key_contact", "denomination", "consultant_firm", "av_opportunity_notes"],
+      "queries": [
+        "Steier Group active church capital campaigns 2025 2026",
+        "Walsh Associates current church capital campaigns 2025 2026",
+        "Timothy Group ongoing church capital campaigns 2025 2026",
+        "Generis new church capital campaigns launched 2025 2026",
+        "churches launching capital campaigns for new sanctuary or expansion 2025 2026",
+        "churches starting capital campaigns or feasibility studies 2025 2026",
+        "churches hiring capital campaign consultants 2025 2026",
+        "churches with active building committees and capital campaigns 2025 2026"
+      ],
+      "seed_firms": ["Steier Group", "Walsh & Associates", "The Timothy Group", "Generis", "Impact Stewardship", "CCS Fundraising", "Horizons Stewardship", "Injoy Stewardship"]
+    }
+  },
+
+  "scoring": {
+    "region_bonus": {
+      "max": 10,
+      "state_aliases": {"texas": "tx", "colorado": "co", "indiana": "in"},
+      "regions": {
+        "tx": ["dallas", "fort worth", "houston", "san antonio", "austin", "plano", "arlington", "irving", "frisco", "mckinney", "richardson"],
+        "co": ["denver", "colorado springs", "aurora", "lakewood", "castle rock", "boulder", "fort collins"],
+        "in": ["indianapolis", "fort wayne", "carmel", "fishers", "greenfield", "muncie", "noblesville"]
+      }
+    },
+    "pipeline": {
+      "decision_lead_months": 13
+    }
+  }
+}

@@ -1,0 +1,14 @@
+# av-lead-scanner runtime dependencies.
+#
+# Only the `discover` / `run` phases need a third-party package (the Gemini
+# grounded-search provider). The `score` phase and the `--mock` / `--dry-run`
+# paths run on the Python 3.10+ standard library alone — no install required.
+
+google-genai>=0.3.0        # default grounded-search provider  (--provider gemini)
+anthropic>=0.40.0          # alternative grounded-search provider (--provider claude)
+
+# Install only the provider you use — each is lazy-imported, so `score`,
+# `--mock`, and the unused provider need neither package.
+#
+# Dev / test (install separately; not needed at runtime):
+#   pytest>=8
