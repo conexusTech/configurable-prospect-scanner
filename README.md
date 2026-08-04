@@ -121,6 +121,64 @@ Expect one of three informative outcomes: a mapping refusal naming exactly which
 config sections are unusable, an engine rejection of the mapped context, or a real
 (mock-sourced) run whose events land on the scan run.
 
+## Running under conqrse-queue (the real path)
+
+**The queue injects exactly one variable: `TASK_RECORD_ID`.** The business payload
+stays in the portal's database and is delivered *by reference* — both repos say so
+independently (`k8s-job.executor.ts`: "Only the reference is injected";
+aeo-backend's enqueue site: "the opaque business envelope the scan task reads back by
+reference"). So a container expecting `ORGANIZATION_ID`/`SCAN_RUN_ID` in its
+environment gets **none of them**. `aeo/bootstrap.py` fetches
+`GET {QUEUE_API_URL}/api/tasks/{TASK_RECORD_ID}` and maps the payload:
+
+| Payload field | Runner value |
+|---|---|
+| `organization_id` *(not `org_id`)* | `ORGANIZATION_ID` |
+| `tenant_id` | `TENANT_ID` |
+| `scan_run_id` | `SCAN_RUN_ID` |
+| `skill.slug` | `SKILL_SLUG` |
+| `phases[]` *(absent = all)* | `PHASES` — this is R6's reduced-phase run |
+
+In queue mode the **payload wins** over any ambient env: the task record is the
+authoritative statement of what the run is, and a stale env var silently scanning the
+wrong org is worse than a missing one.
+
+Everything else — credentials, `AEO_BACKEND_URL`, `QUEUE_API_URL` — arrives through
+the catalog entry's `envFrom` (Secrets/ConfigMaps), which the executor wires normally.
+Only the business payload is by-reference.
+
+### Verified locally, end to end
+
+Docker Desktop's Kubernetes, the queue on `:3200`, the gateway on `:3000`:
+
+```bash
+docker build -t configurable-prospect-scanner:local .
+
+kubectl create secret generic scanner-secrets \
+  --from-literal=GEMINI_API_KEY=... --from-literal=CI_USER=... --from-literal=CI_PASSWORD=...
+kubectl create configmap scanner-config \
+  --from-literal=AEO_BACKEND_URL=http://host.docker.internal:3000 \
+  --from-literal=QUEUE_API_URL=http://host.docker.internal:3200 \
+  --from-literal=AV_SCANNER_PROVIDER=gemini
+
+curl -X POST localhost:3200/api/catalog/entries -H 'Content-Type: application/json' -d '{
+  "taskRef": "configurable-prospect-scanner",
+  "image": "configurable-prospect-scanner:local",
+  "resources": {"cpu":"500m","memory":"512Mi"},
+  "retry": {"attempts":1,"backoff":"fixed","delaySec":10},
+  "timeoutSec": 900, "namespace": "default",
+  "envFrom": ["secret/scanner-secrets","configmap/scanner-config"]
+}'
+
+curl -X POST localhost:3200/api/tasks -H 'Content-Type: application/json' \
+  -d '{"taskRef":"configurable-prospect-scanner","idempotencyKey":"<runId>","payload":{...}}'
+```
+
+Two local-only details that matter: **`host.docker.internal`** is how a pod reaches a
+service on the host, and the catalog image must be resolvable without a registry —
+the queue's `K8S_IMAGE_PULL_POLICY=IfNotPresent` plus Docker Desktop's shared image
+store makes a locally-built tag work as-is.
+
 ## Container
 
 ```bash

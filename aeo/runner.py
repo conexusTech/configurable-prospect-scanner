@@ -46,6 +46,7 @@ from aeo.config_mapping import (  # noqa: E402
 )
 from aeo.context_refs import UnresolvedRefError  # noqa: E402
 from aeo.context_refs import resolve as _resolve_refs  # noqa: E402
+from aeo.bootstrap import BootstrapError, bootstrap  # noqa: E402
 from aeo.event_mapping import map_event  # noqa: E402
 from aeo.modules.loader import load_modules  # noqa: E402
 from aeo.phases.contacts import find_contacts, merge_into_scored  # noqa: E402
@@ -252,11 +253,30 @@ def _top_ranked(
 
 
 def main() -> int:
-    org_id = os.environ.get("ORGANIZATION_ID")
-    tenant_id = os.environ.get("TENANT_ID")
-    scan_run_id = os.environ.get("SCAN_RUN_ID")
+    # Under conqrse-queue only TASK_RECORD_ID is injected — the business payload
+    # stays in the portal's DB and must be read back by reference. In queue mode the
+    # payload WINS over any ambient env: the task record is the authoritative
+    # statement of what this run is, and a stale env var silently scanning the wrong
+    # org is a worse failure than a missing one.
+    try:
+        from_queue = bootstrap()
+    except BootstrapError as exc:
+        # No scan run id is knowable yet, so there is nothing to report the failure
+        # against — the queue's own reconciler will mark the Job failed and its logs
+        # are where this lands.
+        _log(f"bootstrap failed: {exc}")
+        return 2
+    if from_queue:
+        _log(f"queue mode: resolved {', '.join(sorted(from_queue))} from the task payload")
+
+    def _resolve(name: str) -> str | None:
+        return from_queue.get(name) or os.environ.get(name)
+
+    org_id = _resolve("ORGANIZATION_ID")
+    tenant_id = _resolve("TENANT_ID")
+    scan_run_id = _resolve("SCAN_RUN_ID")
     backend_url = os.environ.get("AEO_BACKEND_URL")
-    skill_slug = os.environ.get("SKILL_SLUG")
+    skill_slug = _resolve("SKILL_SLUG")
 
     missing = [
         name
@@ -299,7 +319,7 @@ def main() -> int:
         _log(str(exc))
         return 1
 
-    phases = selected_phases(os.environ.get("PHASES"))
+    phases = selected_phases(_resolve("PHASES"))
     _log(f"phases: {', '.join(phases)}")
 
     try:
