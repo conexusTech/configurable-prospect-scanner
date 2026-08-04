@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from aeo.event_mapping import (
     MAX_ITEMS_PER_EVENT,
-    PIPELINE_STATUS_HAZARD,
+    PIPELINE_STATUS_KEY,
     map_event,
     map_prospects_event,
     map_scored_event,
@@ -54,7 +54,7 @@ class TestProspectsMapping:
         # The engine puts `phase` on the EVENT; AEO requires it on each ITEM. A
         # pass-through fails validation for every prospect in the sweep.
         out = map_prospects_event({"type": "prospects", "phase": "discover", "items": [_prospect()]})
-        item = out[0]["items"][0]
+        item = out[0]["data"][0]
         assert item["phase"] == "discover"
         assert item["phase_name"] == "Discovery sweep"
 
@@ -64,11 +64,11 @@ class TestProspectsMapping:
         out = map_prospects_event(
             {"type": "prospects", "phase": "church_architects", "items": [_prospect()]}
         )
-        assert out[0]["items"][0]["phase_name"] == "Church architects"
+        assert out[0]["data"][0]["phase_name"] == "Church architects"
 
     def test_passes_through_only_the_declared_columns(self):
         out = map_prospects_event({"type": "prospects", "phase": "discover", "items": [_prospect()]})
-        assert set(out[0]["items"][0]) == {
+        assert set(out[0]["data"][0]) == {
             "id", "company_name", "city", "state", "address", "website",
             "discovery_data", "phase", "phase_name",
         }
@@ -77,48 +77,86 @@ class TestProspectsMapping:
         out = map_prospects_event(
             {"type": "prospects", "phase": "discover", "items": [_prospect(website=None, city=None)]}
         )
-        item = out[0]["items"][0]
+        item = out[0]["data"][0]
         assert "website" not in item and "city" not in item
 
     def test_keeps_discovery_data_an_object(self):
         # Migration 071 reverted discovery_data from array to object. The engine
         # already emits an object; assert it so nobody "helpfully" wraps it.
         out = map_prospects_event({"type": "prospects", "phase": "discover", "items": [_prospect()]})
-        assert isinstance(out[0]["items"][0]["discovery_data"], dict)
+        assert isinstance(out[0]["data"][0]["discovery_data"], dict)
 
 
 class TestScoredMapping:
     def test_passes_the_five_declared_fields_top_level(self):
         out = map_scored_event({"type": "scored", "items": [_scored()]})
-        item = out[0]["items"][0]
+        item = out[0]["data"][0]
         for field in ("prospect_id", "contact_name", "score", "rank", "score_factors"):
             assert field in item, field
 
-    def test_folds_undeclared_fields_into_scoring_payload(self):
-        # The engine's vertical extras are real signal a salesperson wants; they
-        # are simply not columns. Dropping them loses data a model was paid for.
+    def test_does_NOT_bucket_undeclared_fields_into_scoring_payload(self):
+        # AEO reads exactly one key out of scoring_payload and discards the rest, so
+        # a bucket here would look durable on the wire and persist nothing. The
+        # extras are already durable in discovery_data.by_source on the prospects
+        # event, which IS a persisted open JSONB column.
         out = map_scored_event({"type": "scored", "items": [_scored()]})
-        payload = out[0]["items"][0]["scoring_payload"]
-        assert payload["denomination"] == "Baptist"
-        assert payload["campaign_goal"] == "$2M"
-        assert payload["project_type"] == "sanctuary renovation"
+        payload = out[0]["data"][0]["scoring_payload"]
+        assert set(payload) == {"pipeline_status"}
 
-    def test_pipeline_status_NEVER_travels_top_level(self):
-        # ⚠️ The sixth name collision. The engine's pipeline_status is a
-        # CONSTRUCTION stage from timeline maths; AEO's prospects.pipeline_status is
-        # the SALES workflow an operator drives by hand. Mapping one to the other
-        # would silently overwrite operator state on every scan, with nothing
-        # erroring. It must stay inside scoring_payload.
+    def test_pipeline_status_travels_in_scoring_payload_not_top_level(self):
+        # The DESIGNED channel: AEO reads scoring_payload.pipeline_status and assigns
+        # it set-once (COALESCE), so a skill seeds the value and an operator edit is
+        # never overwritten. Not a collision — an earlier version of this test said
+        # it was, and the live run disproved it.
         out = map_scored_event({"type": "scored", "items": [_scored()]})
-        item = out[0]["items"][0]
-        assert PIPELINE_STATUS_HAZARD not in item
-        assert item["scoring_payload"][PIPELINE_STATUS_HAZARD] == "in campaign"
+        item = out[0]["data"][0]
+        assert PIPELINE_STATUS_KEY not in item
+        assert item["scoring_payload"][PIPELINE_STATUS_KEY] == "in campaign"
 
     def test_drops_an_item_with_no_prospect_id(self):
         # prospect_id is AEO's only required field; without it the item cannot be
-        # attached to anything, so dropping beats a 400 that loses the batch.
+        # attached to anything, so dropping beats a 400 that loses the batch. And
+        # once every item is dropped there is nothing to post at all — see
+        # TestEmptyResults.
         out = map_scored_event({"type": "scored", "items": [_scored(prospect_id=None)]})
-        assert out[0]["items"] == []
+        assert out == []
+
+
+class TestEmptyResults:
+    """A zero-result sweep is a real outcome, not a failed run.
+
+    AEO declares `@ArrayMinSize(1)` on every data array, so posting `{"data": []}`
+    is a 400 — which would flip a legitimately empty scan to `failed`. Found by
+    running against a live gateway; no amount of reading the engine would have
+    surfaced it, because the engine is perfectly happy to emit an empty event.
+    """
+
+    def test_no_post_at_all_for_an_empty_prospects_event(self):
+        assert map_prospects_event({"type": "prospects", "phase": "discover", "items": []}) == []
+
+    def test_no_post_at_all_for_an_empty_scored_event(self):
+        assert map_scored_event({"type": "scored", "items": []}) == []
+
+    def test_map_event_yields_nothing_rather_than_an_empty_batch(self):
+        assert map_event({"type": "prospects", "phase": "discover", "items": []}) == []
+
+
+class TestCompletedSummary:
+    def test_keeps_only_the_four_declared_counters(self):
+        # The engine also puts `provider` in its summary. Relying on the global
+        # ValidationPipe to strip it would make the payload depend on a pipe
+        # setting rather than on this contract.
+        out = map_event(
+            {
+                "type": "completed",
+                "summary": {"total_prospects": 3, "total_scored": 3, "provider": "mock"},
+            }
+        )
+        assert out == [("completed", {"summary": {"total_prospects": 3, "total_scored": 3}})]
+
+    def test_drops_non_numeric_counters(self):
+        out = map_event({"type": "completed", "summary": {"total_prospects": "three"}})
+        assert out == [("completed", {"summary": {}})]
 
 
 class TestBatching:
@@ -128,8 +166,8 @@ class TestBatching:
         items = [_prospect(id=f"id-{i}") for i in range(MAX_ITEMS_PER_EVENT + 1)]
         out = map_prospects_event({"type": "prospects", "phase": "discover", "items": items})
         assert len(out) == 2
-        assert len(out[0]["items"]) == MAX_ITEMS_PER_EVENT
-        assert len(out[1]["items"]) == 1
+        assert len(out[0]["data"]) == MAX_ITEMS_PER_EVENT
+        assert len(out[1]["data"]) == 1
 
     def test_one_batch_when_under_the_cap(self):
         out = map_prospects_event({"type": "prospects", "phase": "discover", "items": [_prospect()]})
@@ -140,8 +178,8 @@ class TestEventRouting:
     def test_routes_each_engine_type_to_its_aeo_type(self):
         assert map_event({"type": "prospects", "phase": "discover", "items": [_prospect()]})[0][0] == "prospects"
         assert map_event({"type": "scored", "items": [_scored()]})[0][0] == "scored"
-        assert map_event({"type": "completed", "summary": {"n": 1}})[0] == (
-            "completed", {"summary": {"n": 1}},
+        assert map_event({"type": "completed", "summary": {"total_prospects": 1}})[0] == (
+            "completed", {"summary": {"total_prospects": 1}},
         )
         assert map_event({"type": "error", "message": "boom"})[0] == (
             "error", {"message": "boom"},

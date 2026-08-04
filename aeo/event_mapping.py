@@ -56,22 +56,28 @@ PROSPECT_PASSTHROUGH = (
     "discovery_data",
 )
 
-#: ⚠️ **`pipeline_status` IS A NAME COLLISION AND MUST NOT BE MAPPED THROUGH.**
+#: `pipeline_status` travels inside `scoring_payload`, and that is the DESIGNED
+#: channel — corrected 2026-08-04 after a live run.
 #:
-#: The engine's `pipeline_status` comes from `calculate_pipeline()` — a *construction
-#: project* stage inferred from timeline arithmetic ("in campaign", "breaking
-#: ground"). AEO's `prospects.pipeline_status` is the **sales** pipeline workflow an
-#: operator drives by hand via `PATCH /prospects/:id/pipeline-status`.
+#: An earlier version of this file called it a name collision and warned against
+#: mapping it. That was wrong, and worth recording because the wrong version was
+#: persuasive: the engine's value comes from `calculate_pipeline()`, AEO has an
+#: operator-driven `PATCH /prospects/:id/pipeline-status`, and the names match — so
+#: "two meanings, one name" looked obvious. What the live run showed instead:
 #:
-#: Same name, unrelated meanings. Mapping one onto the other would silently
-#: overwrite an operator's sales state with a construction-timeline string, on every
-#: scan, with nothing erroring. It is harmless today only because AEO's scored DTO
-#: has no top-level `pipeline_status` — so this constant exists to make the trap
-#: explicit for whoever next reads two identically-named fields and connects them.
+#: - AEO's `scoring_payload` is documented as *"Carries the resolved
+#:   `pipeline_status` … not persisted as a column — read transiently for pipeline
+#:   assignment"*. It exists for this one field.
+#: - Assignment is **set-once** (`COALESCE(p.pipeline_status, …)`), so a skill seeds
+#:   the initial value and an operator's later edit is never overwritten.
+#: - `customer` skills are trusted verbatim; `project` skills are validated against
+#:   `TIMELINE_STAGES` and abstain (NULL) on an unknown key.
+#: - The engine's emitted value (`"6 - Likely Awarded"`) is a **first-class key in
+#:   AEO's own `TIMELINE_STAGES`**, whose stage descriptions read "months to AV
+#:   decision". AEO's pipeline vocabulary was itself derived from this domain.
 #:
-#: This is the sixth name collision this feature has produced. The other five each
-#: cost a defect.
-PIPELINE_STATUS_HAZARD = "pipeline_status"
+#: So the two sides agree because they share an origin. Keep sending it here.
+PIPELINE_STATUS_KEY = "pipeline_status"
 
 
 def phase_name_for(phase: str) -> str:
@@ -82,10 +88,13 @@ def phase_name_for(phase: str) -> str:
 
 
 def _chunk(items: list[Any]) -> Iterator[list[Any]]:
-    """Split into AEO-sized batches. One event in, one-or-more events out."""
-    if not items:
-        yield []
-        return
+    """Split into AEO-sized batches. One event in, zero-or-more events out.
+
+    **Yields nothing for an empty list**, deliberately. AEO declares
+    `@ArrayMinSize(1)` on every data array, so posting `{"data": []}` is a 400 —
+    which would turn "this sweep legitimately found no prospects" into a failed
+    scan run. A zero-result scan is a real outcome, not an error.
+    """
     for start in range(0, len(items), MAX_ITEMS_PER_EVENT):
         yield items[start : start + MAX_ITEMS_PER_EVENT]
 
@@ -105,7 +114,7 @@ def map_prospects_event(event: dict[str, Any]) -> list[dict[str, Any]]:
         out["phase_name"] = display
         mapped.append(out)
 
-    return [{"items": batch} for batch in _chunk(mapped)]
+    return [{"data": batch} for batch in _chunk(mapped)]
 
 
 def map_scored_event(event: dict[str, Any]) -> list[dict[str, Any]]:
@@ -123,13 +132,22 @@ def map_scored_event(event: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         out = {k: item[k] for k in SCORED_PASSTHROUGH if item.get(k) is not None}
 
-        # The overflow, including `pipeline_status`, which deliberately does NOT
-        # travel top-level — see PIPELINE_STATUS_HAZARD.
-        payload = {
-            k: v for k, v in item.items() if k not in SCORED_PASSTHROUGH
-        }
-        if payload:
-            out["scoring_payload"] = payload
+        # `scoring_payload` carries `pipeline_status` and NOTHING ELSE.
+        #
+        # It is tempting to use it as a bucket for the engine's remaining fields
+        # (`denomination`, `campaign_goal`, `project_type`, …) — an earlier version
+        # of this file did. But AEO reads exactly one key out of it and discards the
+        # rest ("not persisted as a column — read transiently"), so a bucket here
+        # creates a convincing illusion of durability: the wire shows rich data, the
+        # database keeps none of it, and nothing errors.
+        #
+        # Those fields are not lost by omitting them. They are already durable in
+        # `discovery_data.by_source` on the `prospects` event, which IS persisted as
+        # an open JSONB column — the scored copies are a flattened re-projection of
+        # data AEO already stored.
+        status = item.get(PIPELINE_STATUS_KEY)
+        if isinstance(status, str) and status:
+            out["scoring_payload"] = {PIPELINE_STATUS_KEY: status}
 
         # `prospect_id` is the only required field; an item without it cannot be
         # attached to anything, so it is dropped loudly rather than sent to 400.
@@ -137,7 +155,7 @@ def map_scored_event(event: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         mapped.append(out)
 
-    return [{"items": batch} for batch in _chunk(mapped)]
+    return [{"data": batch} for batch in _chunk(mapped)]
 
 
 def map_event(event: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
@@ -154,7 +172,28 @@ def map_event(event: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     if etype == "scored":
         return [("scored", p) for p in map_scored_event(event)]
     if etype == "completed":
-        return [("completed", {"summary": event.get("summary", {})})]
+        # Only the four counters AEO's ScanCompletedSummaryDto declares. Anything
+        # else (e.g. the engine's provider name) is dropped rather than sent: the
+        # global ValidationPipe whitelists, and relying on it to strip an extra key
+        # makes the payload depend on a pipe setting rather than on this contract.
+        summary = event.get("summary") or {}
+        return [
+            (
+                "completed",
+                {
+                    "summary": {
+                        k: summary[k]
+                        for k in (
+                            "total_zips",
+                            "total_prospects",
+                            "total_validated",
+                            "total_scored",
+                        )
+                        if isinstance(summary.get(k), (int, float))
+                    }
+                },
+            )
+        ]
     if etype == "error":
         return [("error", {"message": event.get("message", "")})]
     return []

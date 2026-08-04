@@ -1,0 +1,69 @@
+{
+  "organization": { "name": "CSD" },
+  "product_description": "Professional AV integration for churches and worship centers.",
+  "output": { "path": "av-lead.csd-scored.json", "top_n": 10 },
+
+  "_comment": "A ready-to-score context: `prospects` is a list of raw leads an LLM built itself (Scenario 1's 'let Claude do discovery'). Run: python3 av_lead_scanner.py score --context examples/prospects.sample.json --today 2026-07-06 --out - . Each lead here is fictional and only demonstrates the scoring factors.",
+
+  "scoring": {
+    "region_bonus": {
+      "max": 10,
+      "state_aliases": { "texas": "tx", "colorado": "co", "indiana": "in" },
+      "regions": {
+        "tx": ["dallas", "fort worth", "houston", "san antonio", "austin", "plano", "frisco"],
+        "co": ["denver", "colorado springs", "aurora"],
+        "in": ["indianapolis", "fort wayne", "carmel"]
+      }
+    }
+  },
+
+  "prospects": [
+    {
+      "organization_name": "Cornerstone Community Church",
+      "city": "Frisco", "state": "TX",
+      "project_description": "New 1,800-seat sanctuary and worship center",
+      "project_type": "new build",
+      "project_phase": "capital campaign",
+      "estimated_timeline": "completion Fall 2027",
+      "campaign_goal": "$14,000,000",
+      "denomination": "Nondenominational",
+      "key_contact": "Pastor James Reed",
+      "av_opportunity_notes": "Full AV buildout — sound, video walls, lighting, streaming.",
+      "source_count": 3,
+      "ai_score_adjustment": 8
+    },
+    {
+      "organization_name": "Grace Fellowship",
+      "city": "Denver", "state": "CO",
+      "project_description": "Sanctuary renovation and lobby remodel",
+      "project_type": "renovation",
+      "project_phase": "design",
+      "estimated_timeline": "opens Spring 2026",
+      "denomination": "Baptist",
+      "key_contact": "Admin Sarah Cole",
+      "source_count": 1
+    },
+    {
+      "organization_name": "St. Mark Cathedral",
+      "city": "Chicago", "state": "IL",
+      "project_description": "Major renovation of historic worship hall",
+      "project_type": "major renovation",
+      "project_phase": "under construction",
+      "estimated_timeline": "completion 2025",
+      "denomination": "Catholic",
+      "source_count": 1
+    },
+    {
+      "organization_name": "New Life Worship Center",
+      "city": "Indianapolis", "state": "IN",
+      "project_description": "Campus relocation, new build on 40 acres",
+      "project_type": "campus",
+      "project_phase": "feasibility",
+      "campaign_goal": "$22,000,000",
+      "denomination": "Assemblies of God",
+      "key_contact": "Pastor Dan Whitfield",
+      "source_count": 2,
+      "ai_score_adjustment": 5
+    }
+  ]
+}
