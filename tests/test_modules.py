@@ -12,7 +12,7 @@ import textwrap
 
 import pytest
 
-from aeo.modules.apply import apply_modules
+from aeo.modules.apply import apply_modules, merge_signals_into_scored
 from aeo.modules.interface import (
     MAX_SIGNALS_PER_PROSPECT,
     MODULE_API_VERSION,
@@ -201,3 +201,51 @@ class TestApply:
 
     def test_skips_prospects_with_no_id(self):
         assert apply_modules([{"company_name": "No Id"}], [self._Good()], context={}) == {}
+
+
+class TestMergeSignalsIntoScored:
+    """Signals ride the `scored` event — AEO's second per-prospect write."""
+
+    def test_attaches_signals_to_the_matching_scored_item(self):
+        scored = [{"prospect_id": "p1", "score": 80}, {"prospect_id": "p2", "score": 70}]
+        out = merge_signals_into_scored(scored, {"p1": {"good.seen": "First"}})
+        assert out[0]["custom_signals"] == {"good.seen": "First"}
+        assert "custom_signals" not in out[1]
+
+    def test_no_signals_leaves_scored_untouched(self):
+        scored = [{"prospect_id": "p1", "score": 80}]
+        assert merge_signals_into_scored(scored, {}) == [{"prospect_id": "p1", "score": 80}]
+
+    def test_drops_signals_for_a_prospect_that_did_not_survive_to_scoring(self):
+        # AEO keys the write on prospect_id, so an orphan would match no row.
+        # Not emitting it is honest; emitting it would look like data that landed.
+        scored = [{"prospect_id": "p1", "score": 80}]
+        out = merge_signals_into_scored(scored, {"gone": {"good.seen": "X"}})
+        assert out == [{"prospect_id": "p1", "score": 80}]
+
+    def test_merges_rather_than_replacing(self):
+        scored = [{"prospect_id": "p1", "custom_signals": {"a.x": 1}}]
+        out = merge_signals_into_scored(scored, {"p1": {"b.y": 2}})
+        assert out[0]["custom_signals"] == {"a.x": 1, "b.y": 2}
+
+    def test_applying_the_same_signals_twice_is_idempotent(self):
+        # Both ends merge (here, and `custom_fields || custom_signals` in AEO),
+        # so a replayed callback must not compound.
+        scored = [{"prospect_id": "p1"}]
+        once = merge_signals_into_scored(scored, {"p1": {"a.x": 1}})
+        twice = merge_signals_into_scored(once, {"p1": {"a.x": 1}})
+        assert twice[0]["custom_signals"] == {"a.x": 1}
+
+    def test_end_to_end_shape_is_what_the_gateway_dto_declares(self):
+        """apply → merge produces `custom_signals`: flat, namespaced, primitives.
+
+        Pinned as one chain rather than two units because the DTO on the other
+        side accepts exactly this and nothing re-derives it there.
+        """
+        prospects = [{"id": "p1", "company_name": "First"}]
+        signals = apply_modules(prospects, [TestApply._Good()], context={})
+        out = merge_signals_into_scored([{"prospect_id": "p1"}], signals)
+        blob = out[0]["custom_signals"]
+        assert blob == {"good.seen": "First"}
+        assert all(isinstance(k, str) and "." in k for k in blob)
+        assert all(isinstance(v, (str, int, float, bool, type(None))) for v in blob.values())

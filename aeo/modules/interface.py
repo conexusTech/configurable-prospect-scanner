@@ -18,8 +18,17 @@ That is a restriction, and it is the point. This is **LLM-generated code running
 the same process as a scan that writes to a customer's database**. A module that
 could remove prospects could silently empty a run; one that could rewrite scores
 could reorder a salesperson's day with no audit trail. Contributing signals is
-enough to be useful — a signal can feed scoring through the normal config-driven
-path — while keeping the blast radius to "this prospect gained a wrong field".
+enough to be useful while keeping the blast radius to "this prospect gained a
+wrong field".
+
+⚠️ **A signal does NOT currently feed scoring, and this docstring used to say it
+did** ("a signal can feed scoring through the normal config-driven path" — removed
+2026-08-10). Scoring is the vendored engine's `score_prospects`, which is verbatim
+upstream code that knows nothing about these keys, and it runs *before* modules
+are applied. Signals are persisted to `prospects.custom_fields` and rendered; they
+do not move `score`. Correcting it rather than leaving it aspirational, because a
+comment asserting a path that does not exist is the failure this feature has hit
+repeatedly — the next person would build against it instead of building it.
 
 If a future module genuinely needs to filter or score, that should be a **second,
 separately-reviewed interface** with its own gate, not a widening of this one.

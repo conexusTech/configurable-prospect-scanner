@@ -45,3 +45,35 @@ def apply_modules(
         if merged:
             collected[prospect_id] = merged
     return collected
+
+
+def merge_signals_into_scored(
+    scored: list[dict[str, Any]], signals: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Attach collected signals to their scored item as `custom_signals`.
+
+    Mirrors `contacts.merge_into_scored`: signals are computed from the prospect
+    set but travel to AEO on the `scored` event, because that is the run's second
+    per-prospect write. The engine emits `prospects` mid-discovery, before a
+    module could contribute, so there is no earlier event to ride.
+
+    Signals for a prospect that did not survive to scoring are dropped rather
+    than emitted unattached — AEO keys the write on `prospect_id`, so an orphan
+    would match no row and silently do nothing anyway. Better to not send it.
+    """
+    if not signals:
+        return scored
+
+    by_id = {s.get("prospect_id"): s for s in scored}
+    for prospect_id, module_signals in signals.items():
+        target = by_id.get(prospect_id)
+        if target is None or not module_signals:
+            continue
+        # Merge rather than assign: keys are already namespaced per module, and
+        # AEO merges again on its side (`custom_fields || custom_signals`), so a
+        # replay is idempotent at both ends.
+        target["custom_signals"] = {
+            **(target.get("custom_signals") or {}),
+            **module_signals,
+        }
+    return scored

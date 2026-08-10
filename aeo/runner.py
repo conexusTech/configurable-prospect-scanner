@@ -48,6 +48,7 @@ from aeo.context_refs import UnresolvedRefError  # noqa: E402
 from aeo.context_refs import resolve as _resolve_refs  # noqa: E402
 from aeo.bootstrap import BootstrapError, bootstrap  # noqa: E402
 from aeo.event_mapping import map_event  # noqa: E402
+from aeo.modules.apply import apply_modules, merge_signals_into_scored  # noqa: E402
 from aeo.modules.loader import load_modules  # noqa: E402
 from aeo.phases.contacts import find_contacts, merge_into_scored  # noqa: E402
 from aeo.phases.geo_filter import (  # noqa: E402
@@ -371,27 +372,24 @@ def main() -> int:
     # no-op today; it runs anyway so the gate is exercised by every real scan rather
     # than only by its unit tests.
     #
-    # ⚠️ Loading is wired; APPLYING is not, and that is deliberate rather than
-    # unfinished. Two things must exist first, and neither is ours alone to decide:
-    #   1. `custom_modules` has no home in the ratified config — root is
-    #      `additionalProperties: false`, so a config carrying it is rejected at
-    #      finalize. Adding it is a coordinated schema bump.
-    #   2. Where a module's signals PERSIST is undecided. The engine emits its
-    #      `prospects` event during discovery, before modules could contribute, so
-    #      either signals ride a second (upsert) event or they need their own column.
-    #      Guessing at upsert semantics is how the last four defects happened.
-    # `aeo.modules.apply.apply_modules` ships tested, so turning R11 on is a small
-    # reviewable change rather than a design exercise.
+    # Both blockers that kept loading wired but APPLYING unwired are closed
+    # (thread #20, 2026-08-10):
+    #   1. `custom_modules` now has a home in the ratified config — the root is
+    #      still `additionalProperties: false`, but the key is declared, with the
+    #      shape taken from this file's own `REQUIRED_SPEC_FIELDS` so the schema
+    #      and the gate cannot drift.
+    #   2. Signals persist in `prospects.custom_fields`, riding the `scored`
+    #      event. Nothing new had to be invented: `scored` is already the run's
+    #      second per-prospect write (contact patches ride it too), and AEO
+    #      merges with `custom_fields || custom_signals`, so a replayed callback
+    #      is idempotent.
     custom_modules = load_modules(
         config.get("custom_modules"),
         base_dir=Path(__file__).resolve().parent.parent / "modules_data",
         on_reject=lambda name, reason: _log(f"custom module {name}: {reason}"),
     )
     if custom_modules:
-        _log(
-            f"loaded {len(custom_modules)} custom module(s) — NOT applied; see the "
-            f"R11 note in runner.py"
-        )
+        _log(f"loaded {len(custom_modules)} custom module(s)")
 
     try:
         # ── zip discovery (Phase 0) ───────────────────────────────────────
@@ -555,6 +553,30 @@ def main() -> int:
                 emit=sink.emit,
             )
             scored = merge_into_scored(scored, patches)
+
+        # R11 — custom-module signals, computed from the surviving prospect set
+        # and merged onto the scored items so they travel on the one event AEO
+        # already upserts per prospect.
+        #
+        # ⚠️ These signals do NOT influence `score`. Scoring is the vendored
+        # engine's `score_prospects`, which ran above and knows nothing about
+        # them; the engine is vendored verbatim and is not ours to teach. So a
+        # signal is persisted and rendered, not scored on. Saying so here
+        # because the neighbouring interface docstring used to imply otherwise.
+        if custom_modules:
+            signals = apply_modules(
+                prospects,
+                custom_modules,
+                context=tool_context,
+                on_error=lambda name, pid, exc: _log(
+                    f"custom module {name} failed on prospect {pid}: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+            )
+            if signals:
+                scored = merge_signals_into_scored(scored, signals)
+                _log(f"custom modules contributed signals for {len(signals)} prospect(s)")
+
         sink.emit({"type": "scored", "phase": "score", "items": scored})
         sink.emit(
             {
