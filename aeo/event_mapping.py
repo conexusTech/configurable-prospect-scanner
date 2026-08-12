@@ -46,13 +46,23 @@ SCORED_PASSTHROUGH = (
 )
 
 # Fields on the engine's `prospects` item that map straight onto AEO columns.
+#: ⚠️ **A field absent here can never reach its column, however well it was collected.**
+#: `industry` and `zip_code` were added 2026-08-12: both are declared on AEO's
+#: `ScanProspectItemDto`, both were being collected (12 of 36 prospects carried an
+#: `industry` on the first real production run), and both were stranded in
+#: `discovery_data` with the columns left NULL because this tuple did not name them.
 PROSPECT_PASSTHROUGH = (
     "id",
     "company_name",
+    "industry",
     "city",
     "state",
+    "zip_code",
     "address",
     "website",
+    "contact_name",
+    "contact_title",
+    "sources",
     "discovery_data",
 )
 

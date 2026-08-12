@@ -21,7 +21,10 @@ Env (all injected by the queue in a real run):
   CI_USER/CI_PASSWORD        — HTTP Basic for both AEO calls
   AV_SCANNER_MOCK=1          — offline provider; no model key needed (local runs)
   AV_SCANNER_PROVIDER        — gemini|claude when not mocking
-  SCANNER_TOP_N              — output ranking cut (default 50)
+  SCANNER_TOP_N              — FALLBACK limit (default 50) for the output ranking cut,
+                               and for `discovery.target_prospects` /
+                               `contacts.max_prospects` when the skill config omits them.
+                               The config wins; this is the deployment default only.
 """
 
 from __future__ import annotations
@@ -200,9 +203,16 @@ class AeoEventSink(als.Sink):
                 tenant_id=self._tenant,
                 organization_id=self._org,
             )
-        count = sum(len(p.get("data", [])) for _, p in posts)
+        # `completed` is a SUMMARY payload with no `data` array, so the item counter
+        # reports 0 for it — which read as "the run delivered nothing" and cost two
+        # investigations, one of which published a wrong mechanism before the answer
+        # turned out to be this line. Terminal events say what they are instead.
         suffix = f" in {len(posts)} batches" if len(posts) > 1 else ""
-        _log(f"forwarded {etype}: {count} item(s){suffix}")
+        if any(t == "completed" for t, _ in posts):
+            _log(f"forwarded {etype}: run summary (no item list){suffix}")
+        else:
+            count = sum(len(p.get("data", [])) for _, p in posts)
+            _log(f"forwarded {etype}: {count} item(s){suffix}")
 
 
 def _log(message: str) -> None:
@@ -248,6 +258,36 @@ def selected_phases(raw: str | None) -> list[str]:
     if PHASE_DISCOVERY not in chosen:
         chosen.insert(0, PHASE_DISCOVERY)
     return chosen
+
+
+#: Fallback when the skill config does not state a limit. `SCANNER_TOP_N` remains the
+#: deployment-level default so behaviour is unchanged for configs that say nothing.
+_ENV_LIMIT_FALLBACK = "SCANNER_TOP_N"
+
+
+def _config_limit(config: dict[str, Any], section: str, key: str, default: int = 50) -> int:
+    """A run limit, **from the skill config first, the environment only as a fallback.**
+
+    ⚠️ **An environment variable is static configuration too.** `SCANNER_TOP_N` alone used
+    to drive three unrelated things — how many in-area prospects discovery keeps looking
+    for, how many prospects get contact enrichment, and the output ranking cut — so one
+    deployment value silently overrode what the skill had decided. Set to 1 in a real
+    environment it capped a 15-market scan to a single round of discovery and enriched
+    exactly one prospect of fourteen, which read as "the model found little" rather than
+    "we stopped looking".
+    """
+    block = config.get(section)
+    raw = block.get(key) if isinstance(block, dict) else None
+    try:
+        value = int(raw)
+        if value > 0:
+            return value
+    except (TypeError, ValueError):
+        pass
+    try:
+        return max(1, int(os.environ.get(_ENV_LIMIT_FALLBACK, str(default))))
+    except (TypeError, ValueError):
+        return default
 
 
 def _top_ranked(
@@ -485,7 +525,9 @@ def main() -> int:
             prospects, geo_rejects = discover_in_area(
                 tool_context=tool_context,
                 area=area,
-                target_count=int(os.environ.get("SCANNER_TOP_N", "50")),
+                # How many in-area prospects to keep discovering for — the skill's
+                # call, not the deployment's.
+                target_count=_config_limit(config, "discovery", "target_prospects"),
                 discover=_discover,
                 provider=provider,
                 provider_config=provider_config,
@@ -499,6 +541,15 @@ def main() -> int:
                     f"{len(geo_rejects)} prospect(s) rejected on VERIFIED address — "
                     f"outside {area.describe()}"
                 )
+
+        # How many prospects DISCOVERY produced, captured before validation filters
+        # `prospects` down to survivors. Reported as `total_prospects` because that is
+        # what the `prospects` table holds — every discovered row persists, judged or
+        # not. Without this the summary counted survivors, so a run wrote 33 rows and
+        # reported 14, duplicating `total_scored` and leaving the discovered count
+        # reported nowhere. aeo-frontend saw the mismatch first and asked whether it was
+        # "a cap, a filter, or an incomplete pass" — it was none of those, it was this.
+        total_discovered = len(prospects)
 
         # `geo_rejects` is already populated by the verify loop above — rejections
         # there carry a VERIFIED address, which is strictly better evidence than the
@@ -542,7 +593,9 @@ def main() -> int:
         # for the top `SCANNER_TOP_N` by rank. Enriching a prospect nobody will
         # look at is spend with no reader.
         if PHASE_CONTACTS in phases and config.get("contacts"):
-            targets = _top_ranked(prospects, scored, int(os.environ.get("SCANNER_TOP_N", "50")))
+            targets = _top_ranked(
+                prospects, scored, _config_limit(config, "contacts", "max_prospects")
+            )
             patches = find_contacts(
                 targets,
                 contacts_config=config["contacts"],
@@ -581,8 +634,15 @@ def main() -> int:
         sink.emit(
             {
                 "type": "completed",
+                # ⚠️ All FOUR counters AEO declares, not two. `total_zips` and
+                # `total_validated` were never sent, and the event mapper filters to
+                # declared keys — so the gateway wrote NULL for both while the rows
+                # themselves persisted fine (60 zip rows, `total_zips = null`). The
+                # gap read as a gateway defect for a day; it was this dictionary.
                 "summary": {
-                    "total_prospects": len(prospects),
+                    "total_zips": len(zip_rows),
+                    "total_prospects": total_discovered,
+                    "total_validated": len(validations),
                     "total_scored": len(scored),
                     "provider": provider_name,
                 },

@@ -228,7 +228,26 @@ def test_score_capped_at_100():
         "permit_type": "building", "consultant_firm": "c",
         "source_count": 3, "ai_score_adjustment": 15,
     }
-    ctx = {"scoring": {"region_bonus": {"max": 10, "state_aliases": {}, "regions": {"tx": ["dallas"]}}}}
+    # `completeness.fields` is now declared explicitly. Before 2026-08-12 the engine
+    # supplied a hardcoded church-AV field list as the default, which this lead happened
+    # to fill completely; completeness is now config-derived (see UPSTREAM.md), so with
+    # no `sources` in ctx the fallback is the vertical-neutral identity set, which this
+    # lead does NOT fill — 98, and the cap this test exists to check goes unexercised.
+    # Declaring the fields keeps the test's intent intact.
+    ctx = {
+        "scoring": {
+            "region_bonus": {"max": 10, "state_aliases": {}, "regions": {"tx": ["dallas"]}},
+            "completeness": {
+                "max": 15,
+                "fields": [
+                    "organization_name", "city", "state", "project_description",
+                    "project_type", "project_phase", "campaign_goal", "denomination",
+                    "key_contact", "av_opportunity_notes", "permit_type",
+                    "consultant_firm",
+                ],
+            },
+        }
+    }
     assert _score_one(lead, ctx)["score"] == 100
 
 
@@ -284,10 +303,23 @@ def test_pipeline_campaign_goal_floor():
     assert r["pipeline_status"] == "2 - Relationship Building"
 
 
-def test_pipeline_default_unknown():
+def test_pipeline_default_abstains_rather_than_inventing_a_stage():
+    """Changed 2026-08-12 (see UPSTREAM.md): the default used to return the literal
+    `"Unknown"` with 10 of 30 timing points.
+
+    Both were harmful in ways a unit test could not see. AEO consumes
+    `pipeline_status` as a **sales** stage that drives operator kanbans, so every
+    prospect arrived in a column no human moved it to; and awarding 10 points on no
+    evidence is what made a real production run's scores cluster at 11-12 regardless
+    of the prospect. Abstaining leaves the column NULL and the axis silent.
+    """
     cfg = als._DEFAULT_SCORING["pipeline"]
     r = als.calculate_pipeline({}, cfg, TODAY)
-    assert r["pipeline_status"] == "Unknown"
+    assert r["pipeline_status"] is None, "must abstain, not invent a sales stage"
+    assert r["score"] == 0, "no timing evidence must contribute no points"
+    # The rest of the shape stays stable for consumers.
+    assert r["months_to_decision"] is None
+    assert r["estimated_completion"] == "Unknown"
 
 
 # ── provider seam (gemini / claude / mock) ──────────────────────────────────

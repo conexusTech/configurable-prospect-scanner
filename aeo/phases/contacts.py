@@ -60,6 +60,9 @@ TARGET JOB TITLES (in priority order)
 TARGET SENIORITY LEVELS
 {seniorities}
 
+THE SELLER'S CONTACT PREFERENCES
+{preferences}
+
 Use grounded public sources. **Do not guess or construct an email address**: if you
 cannot find one stated publicly, leave it empty. Never invent a person.
 
@@ -114,6 +117,11 @@ def find_contacts(
     """
     titles = _as_lines(contacts_config.get("titles"))
     seniorities = _as_lines(contacts_config.get("seniorities"))
+    # ⚠️ Authored by CSB-built skills and read by NOTHING until 2026-08-12 — the third
+    # authored-but-unread key found in one audit (`scoring.factors`, `validation.rules`,
+    # this). An unread key is indistinguishable from a respected one at every surface
+    # the operator sees.
+    preferences = _as_lines(contacts_config.get("contact_preferences"))
 
     if emit:
         emit({"type": "phase_start", "phase": "contacts"})
@@ -126,6 +134,7 @@ def find_contacts(
             product=product_description or "(not specified)",
             titles=titles,
             seniorities=seniorities,
+            preferences=preferences,
         )
         raw = provider(
             prompt,

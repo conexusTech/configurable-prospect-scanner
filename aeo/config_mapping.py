@@ -35,9 +35,16 @@ from typing import Any
 # planning_board), so requiring it would reject a legitimate config.
 SOURCE_REQUIRED_KEYS = ("name_field", "fields", "queries")
 
-# Provider defaults. Deliberately NOT read from the skill config: model choice and
-# retry policy are deployment concerns that change with our infrastructure, not
-# authoring decisions an operator made in a chat. Overridable by env at run time.
+# Provider defaults. `model`, `temperature` and `retry_attempts` are deliberately NOT
+# read from the skill config: they are deployment concerns that change with our
+# infrastructure, not authoring decisions an operator made in a chat.
+#
+# ⚠️ **`entries_per_query` is the exception, and grouping it here was a categorisation
+# error.** It is not infrastructure — it is the YIELD knob, and it was the binding cap on
+# every scan: 13 geo-anchored queries x 3 entries = 39 raw, 36 after dedup, on two
+# consecutive production runs that produced identical counts from different companies.
+# How many candidates a query should return is exactly the kind of decision an operator
+# makes, so `discovery.entries_per_query` now overrides it (see `build_tool_context`).
 DEFAULT_PROVIDER = {
     "model": "gemini-3-flash-preview",
     "temperature": 0.1,
@@ -100,6 +107,22 @@ class UnmappedConfigError(ValueError):
             "Skill config cannot be mapped onto the scanner's context:\n  - "
             + joined
         )
+
+
+def _authored_yield(config: dict[str, Any]) -> dict[str, Any]:
+    """`discovery.entries_per_query`, when the skill authored one.
+
+    Returns an override fragment rather than a value so the provider block keeps its
+    single merge order and a bad value simply changes nothing. Non-positive and
+    unparseable values are ignored: a zero here would silently return no prospects at
+    all, which is worse than a low cap.
+    """
+    raw = (config.get("discovery") or {}).get("entries_per_query")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return {}
+    return {"entries_per_query": value} if value > 0 else {}
 
 
 def _resolved_markets(context: dict[str, Any]) -> list[str]:
@@ -227,9 +250,25 @@ def build_tool_context(
         raise UnmappedConfigError(problems)
 
     return {
-        "organization": {"name": org_name, "markets": markets},
+        # `sales_cycle_months` is the org's real decision lead time. It was already
+        # exposed by the gateway's runtime context and reachable by nothing: the engine
+        # instead used a hardcoded 13-month church-construction cycle. Passed through
+        # verbatim (None when the org has not set it) so the engine can tell "not set"
+        # from a value and fall back to its own default only then.
+        "organization": {
+            "name": org_name,
+            "markets": markets,
+            "sales_cycle_months": org.get("sales_cycle_months",
+                                          context.get("sales_cycle_months")),
+            # The commissioning org's own identity, so discovery can exclude it from its
+            # own prospect list. On the first real production run the org was discovered
+            # as a prospect for itself and survived every filter — rejected only by luck
+            # of an unrelated disqualifier it happened to match.
+            "aliases": org.get("aliases") or [],
+            "exclusions": org.get("exclusions") or [],
+        },
         "product_description": product_description,
-        "gemini": {**DEFAULT_PROVIDER, **(provider or {})},
+        "gemini": {**DEFAULT_PROVIDER, **(provider or {}), **_authored_yield(config)},
         "output": {"path": output_path, "top_n": top_n},
         "sources": _with_geo_strict_prompt(
             # Order matters only for readability; both are pure. The fan-out runs on

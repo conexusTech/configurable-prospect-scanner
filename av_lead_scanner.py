@@ -50,7 +50,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Sequence
 
 log = logging.getLogger("av_lead_scanner")
 
@@ -573,7 +573,10 @@ def discover(
                     emit({"type": "phase_complete", "phase": source_name,
                           "count": per_source_rows[source_name]})
 
-    prospects = _assemble_prospects(groups=groups, scan_run_id=scan_run_id)
+    prospects = _assemble_prospects(groups=groups, scan_run_id=scan_run_id,
+                                    canonical=canonical_fields_from_sources(sources),
+                                    excluded_names=excluded_prospect_names(ctx),
+                                    log=_log_from(ctx))
     emit({
         "type": "prospects",
         "phase": "discover",
@@ -587,8 +590,56 @@ def _strip_internal(prospect: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in prospect.items() if k != "_internal"}
 
 
-def _assemble_prospects(*, groups: dict[str, list[dict[str, Any]]], scan_run_id: str) -> list[dict[str, Any]]:
-    """Collapse source-bucketed rows into unified, deterministic-ID prospects."""
+def _log_from(ctx: dict[str, Any]) -> Callable[[str], None]:
+    """The caller's log sink if it supplied one, else the engine's own stderr line.
+
+    Exists so `_assemble_prospects` can report an exclusion visibly. The engine prints
+    `[aeo]`-style progress through an injected callable; anything written to the module
+    logger is invisible in the container, which is how a silent filter came to look
+    identical to a filter that never ran.
+    """
+    sink = ctx.get("_log") if callable(ctx.get("_log")) else None
+    if sink:
+        return sink
+
+    def _default(message: str) -> None:
+        print(f"[aeo] {message}", file=sys.stderr, flush=True)
+
+    return _default
+
+
+def excluded_prospect_names(ctx: dict[str, Any]) -> set[str]:
+    """Normalized names discovery must never return as prospects.
+
+    The commissioning organization itself, its aliases, and anything it has asked to
+    suppress. **Measured need:** on the first real production run the org appeared in its
+    own prospect list and passed every filter — it was rejected only because it happens to
+    have in-house mechanical staff, i.e. by luck of an unrelated disqualifier. An org
+    without that quirk would have been sold to itself.
+
+    Matched on `normalize_name`, the same key cross-source dedup uses, so a legal-entity
+    suffix or punctuation difference cannot slip past.
+    """
+    org = ctx.get("organization") if isinstance(ctx.get("organization"), dict) else {}
+    candidates: list[Any] = [org.get("name"), ctx.get("organization_name")]
+    for key in ("aliases", "exclusions"):
+        value = org.get(key)
+        if isinstance(value, list):
+            candidates.extend(value)
+    names = {normalize_name(str(c)) for c in candidates if str(c or "").strip()}
+    names.discard("")
+    return names
+
+
+def _assemble_prospects(*, groups: dict[str, list[dict[str, Any]]], scan_run_id: str,
+                        canonical: Sequence[str] | None = None,
+                        excluded_names: set[str] | None = None,
+                        log: Callable[[str], None] | None = None) -> list[dict[str, Any]]:
+    """Collapse source-bucketed rows into unified, deterministic-ID prospects.
+
+    `excluded_names` drops the commissioning org and anything it suppresses — see
+    `excluded_prospect_names`.
+    """
     prospects: list[dict[str, Any]] = []
     for norm, members in groups.items():
         if not members:
@@ -603,17 +654,65 @@ def _assemble_prospects(*, groups: dict[str, list[dict[str, Any]]], scan_run_id:
             if src not in per_source or _richness(m["raw"]) > _richness(per_source[src]):
                 per_source[src] = m["raw"]
 
-        internal = _merge_for_scoring(members)
+        if excluded_names and norm in excluded_names:
+            # Through the INJECTED logger, not the module one. The first version used
+            # `log.info`, which never reaches container stdout — so an exclusion that
+            # fired looked exactly like one that never happened, and the absence of this
+            # line was mistaken for evidence the org had not been discovered.
+            message = f"excluding {company_name!r} — the organization's own listing"
+            if log:
+                log(message)
+            continue
+
+        internal = _merge_for_scoring(members, canonical)
         internal.update(sources_found_in=", ".join(sources_found_in),
                         multi_source=source_count > 1, source_count=source_count)
+
+        # Locality: prefer what the source returned; fall back to parsing the address
+        # it *did* return. On the first real production run every prospect had a street
+        # address and NULL city/state/zip, because sources answer with one address
+        # string — which also killed region scoring, since that reads city/state.
+        address = internal.get("location_address") or None
+        city, state, zip_code = _parse_locality(
+            address,
+            city=internal.get("city"),
+            state=internal.get("state"),
+            zip_code=internal.get("zip_code"),
+        )
+
+        # ⚠️ Write the parsed locality back into `internal` too, not just the record.
+        # `_scoring_input` reads `_internal` whenever it is present — which is always,
+        # in a single-process run — so parsing only into the record below left the
+        # SCORER seeing empty city/state while the database showed them correctly.
+        # Measured: every prospect scored `region_bonus: 0` on a run whose rows all
+        # had a city, and the geo-fence simultaneously reported them as in-area. Two
+        # views of one fact is the defect; one assignment fixes it.
+        if city:
+            internal["city"] = city
+        if state:
+            internal["state"] = state
+        if zip_code:
+            internal["zip_code"] = zip_code
 
         prospects.append({
             "id": str(uuid.uuid5(_NAMESPACE, f"{scan_run_id}:{norm}")),
             "company_name": company_name,
-            "city": internal.get("city") or None,
-            "state": internal.get("state") or None,
-            "address": internal.get("location_address") or None,
+            "industry": internal.get("industry") or None,
+            "city": city,
+            "state": state,
+            "zip_code": zip_code,
+            "address": address,
             "website": internal.get("website_url") or None,
+            # Contact details a discovery source already returned. AEO declares both on
+            # its prospect callback; before 2026-08-12 neither was sent, so 12 of 36
+            # prospects on a real run had a title sitting in `discovery_data` while the
+            # column stayed empty. `or None` matters: this emitted `''` for most rows,
+            # which reads as "present" to a count or a truthiness check.
+            "contact_name": internal.get("key_contact") or None,
+            "contact_title": internal.get("contact_title") or None,
+            # Provenance. The column is plain text and was never populated, so nothing
+            # could say which source a prospect came from without opening the JSONB.
+            "sources": ", ".join(sources_found_in) or None,
             "discovery_data": {
                 "sources_found_in": sources_found_in,
                 "source_count": source_count,
@@ -622,6 +721,39 @@ def _assemble_prospects(*, groups: dict[str, list[dict[str, Any]]], scan_run_id:
             "_internal": internal,
         })
     return prospects
+
+
+#: Trailing "…, <city>, <ST> <zip>" — the shape sources actually return. Deliberately
+#: narrow: it fills a gap, it does not guess. Anything that does not match this exact
+#: tail is left as None, because a wrong city silently mis-scores region and mis-routes
+#: a lead to the wrong sales territory, which is worse than an empty field.
+_LOCALITY_TAIL = re.compile(
+    r",\s*(?P<city>[^,]{2,40}),\s*(?P<state>[A-Za-z]{2})\.?\s*(?P<zip>\d{5}(?:-\d{4})?)?\s*$"
+)
+
+
+def _parse_locality(
+    address: str | None, *, city: Any = None, state: Any = None, zip_code: Any = None
+) -> tuple[str | None, str | None, str | None]:
+    """Best-effort city/state/zip, **never overwriting what a source supplied.**
+
+    Returns `(city, state, zip)`. A supplied value always wins; parsing only fills what
+    is missing, and only when the address ends in an unambiguous locality tail.
+    """
+    have_city = str(city or "").strip() or None
+    have_state = str(state or "").strip() or None
+    have_zip = str(zip_code or "").strip() or None
+    if have_city and have_state and have_zip:
+        return have_city, have_state, have_zip
+
+    m = _LOCALITY_TAIL.search(str(address or "").strip()) if address else None
+    if not m:
+        return have_city, have_state, have_zip
+    return (
+        have_city or (m.group("city") or "").strip() or None,
+        have_state or (m.group("state") or "").strip().upper() or None,
+        have_zip or (m.group("zip") or "").strip() or None,
+    )
 
 
 def _pick_canonical_name(members: list[dict[str, Any]]) -> str:
@@ -638,55 +770,116 @@ def _richness(row: dict[str, Any]) -> int:
 
 
 # Alias groups: heterogeneous source schemas → one uniform scoring dict.
-_FIELD_ALIASES: dict[str, list[str]] = {
-    "organization_name": ["organization_name", "firm_name", "company_name"],
-    "city": ["city"],
-    "state": ["state"],
-    "project_description": ["project_description"],
-    "project_type": ["project_type"],
-    "project_phase": ["project_phase"],
-    "campaign_goal": ["campaign_goal"],
-    "campaign_name": ["campaign_name"],
-    "amount_raised": ["amount_raised"],
-    "denomination": ["denomination", "denominations_served"],
-    "key_contact": ["key_contact", "key_consultants", "key_architects", "key_contacts"],
-    "estimated_timeline": ["estimated_timeline"],
-    "av_opportunity_notes": ["av_opportunity_notes", "opportunity_notes", "notes"],
-    "permit_type": ["permit_type"],
-    "board_meeting_type": ["board_meeting_type"],
-    "meeting_date": ["meeting_date"],
-    "consultant_firm": ["consultant_firm"],
-    "location_address": ["location_address", "location", "address"],
-    "website_url": ["website_url", "website"],
+#: **Vertical-neutral identity aliases — the ONLY hardcoded field names left, and
+#: deliberately so.** Every prospect in every vertical has a name, a location and a web
+#: presence, and this engine's own internals read them by these canonical names
+#: (`score_region` reads `city`/`state`; the prospect record reads `organization_name` /
+#: `location_address` / `website_url`). Nothing here names an industry, an organization
+#: or a place.
+#:
+#: ⚠️ **Everything domain-specific is DERIVED from the skill config** — see
+#: `canonical_fields_from_sources`. This replaced a hardcoded 20-field map
+#: (`denomination`, `campaign_goal`, `amount_raised`, `av_opportunity_notes`, …) that
+#: `_merge_raw_rows` iterated, which meant **only those fields survived the merge**: on a
+#: real HVAC run it silently discarded 7 of the 11 fields the skill authored, including
+#: `square_footage` (17 prospects had it) and `portfolio_size` (10 did) — the exact data
+#: the operator's ICP and scoring factors depended on. See UPSTREAM.md.
+_IDENTITY_ALIASES: dict[str, tuple[str, ...]] = {
+    "organization_name": ("organization_name", "company_name", "firm_name", "name"),
+    "city": ("city",),
+    "state": ("state",),
+    "zip_code": ("zip_code", "zip", "postal_code", "postcode"),
+    "location_address": ("location_address", "address", "location", "street_address", "property_address"),
+    "website_url": ("website_url", "website", "url", "domain"),
+    "key_contact": ("key_contact", "contact_name", "contact", "key_contacts"),
+    "contact_title": ("contact_title", "title", "job_title", "role"),
 }
 
 
-def _merge_raw_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _norm_key(key: Any) -> str:
+    """Normalize a field name for matching: case- and punctuation-insensitive.
+
+    Replaces per-field synonym lists for everything except identity. A source that
+    returns `squareFootage`, `square_footage` or `Square Footage` for an authored
+    `square_footage` all land on the same field, without anyone maintaining a table.
+    """
+    return re.sub(r"[^a-z0-9]", "", str(key).lower())
+
+
+def canonical_fields_from_sources(sources_cfg: Any) -> tuple[str, ...]:
+    """The union of `fields` authored across every configured discovery source.
+
+    **The authored fields ARE the vocabulary.** A skill built for any vertical declares
+    what it collects; this engine must carry all of it through the merge rather than
+    intersect it with a list written for one industry.
+    """
+    names: list[str] = []
+    for src in (sources_cfg or {}).values() if isinstance(sources_cfg, dict) else []:
+        for f in (src or {}).get("fields") or []:
+            f = str(f).strip()
+            if f and f not in names:
+                names.append(f)
+    return tuple(names)
+
+
+def _merge_raw_rows(
+    rows: list[dict[str, Any]], canonical: Sequence[str] | None = None
+) -> dict[str, Any]:
     """Collapse heterogeneous source rows into the uniform scoring dict:
-    for each canonical field, keep the longest non-empty aliased value."""
-    combined: dict[str, Any] = {}
-    for canonical, aliases in _FIELD_ALIASES.items():
-        best = ""
+    for each field, keep the longest non-empty value across rows.
+
+    `canonical` is the config-derived field set. **When it is absent the fallback is
+    every key present in the data**, never a fixed list — an unknown key is data we
+    were asked to collect, so dropping it is always the wrong default.
+    """
+    indexed: list[dict[str, Any]] = []
+    for raw in rows:
+        indexed.append({_norm_key(k): v for k, v in (raw or {}).items()})
+
+    names: list[str] = [str(n) for n in (canonical or [])]
+    if not names:
         for raw in rows:
-            for alias in aliases:
-                val = raw.get(alias)
+            for k in (raw or {}):
+                if str(k) not in names:
+                    names.append(str(k))
+    for ident in _IDENTITY_ALIASES:
+        if ident not in names:
+            names.append(ident)
+
+    def _longest(candidates: tuple[str, ...]) -> str:
+        best = ""
+        for idx in indexed:
+            for cand in candidates:
+                val = idx.get(_norm_key(cand))
                 if isinstance(val, list):
                     val = ", ".join(str(v) for v in val)
-                val = str(val or "").strip()
+                val = str(val if val is not None else "").strip()
                 if len(val) > len(best):
                     best = val
-        combined[canonical] = best
+        return best
+
+    combined: dict[str, Any] = {}
+    for name in names:
+        combined[name] = _longest(_IDENTITY_ALIASES.get(name, (name,)))
+
+    # Descriptive free text, generically: any field whose name mentions "description".
+    # The old version read the single church-AV field `project_description`.
     descriptions: list[str] = []
-    for raw in rows:
-        d = str(raw.get("project_description", "") or "").strip()
-        if d and d not in descriptions:
-            descriptions.append(d)
+    for idx in indexed:
+        for norm, val in idx.items():
+            if "description" not in norm:
+                continue
+            d = str(val or "").strip()
+            if d and d not in descriptions:
+                descriptions.append(d)
     combined["all_descriptions"] = descriptions
     return combined
 
 
-def _merge_for_scoring(members: list[dict[str, Any]]) -> dict[str, Any]:
-    return _merge_raw_rows([m["raw"] for m in members])
+def _merge_for_scoring(
+    members: list[dict[str, Any]], canonical: Sequence[str] | None = None
+) -> dict[str, Any]:
+    return _merge_raw_rows([m["raw"] for m in members], canonical)
 
 
 # =============================================================================
@@ -721,13 +914,19 @@ _DEFAULT_SCORING: dict[str, Any] = {
     },
     "region_bonus": {
         "max": 10,
-        "state_aliases": {"texas": "tx", "colorado": "co", "indiana": "in"},
+        # Empty by design: the region map and its aliases are derived from the org's
+        # own markets (see `regions_from_markets`). This used to hardcode Texas,
+        # Colorado and Indiana — the previous customer's states.
+        "state_aliases": {},
         "regions": {},  # {state_abbr: [city, ...]} — empty means no bonus
     },
     "multi_source": {"max": 10, "tiers": [[3, 10], [2, 6]]},
     "pipeline": {
         "max": 30,
         "decision_lead_months": 13,
+        #: Fields that may carry the timing signal, in priority order. Derived from the
+        #: skill's authored fields when it does not declare them (see `score_prospects`).
+        "timing_fields": ("estimated_timeline",),
         "statuses": [
             [18, 999, "1 - Early Discovery", "18+ months to decision.", 20],
             [12, 18, "2 - Relationship Building", "12-18 months to decision.", 26],
@@ -754,7 +953,13 @@ _DEFAULT_SCORING: dict[str, Any] = {
             "construction": ["6 - Likely Awarded", "Construction underway.", 8],
         },
         "campaign_goal_floor": {"status": "2 - Relationship Building", "detail": "Has campaign goal; assumed fundraising.", "score": 20},
-        "default": {"status": "Unknown", "detail": "No timeline/phase/campaign data.", "score": 10},
+        # ⚠️ **Abstain, do not invent.** `pipeline_status` is consumed by AEO as a SALES
+        # stage and drives operator kanbans, so a fabricated "Unknown" put every
+        # prospect into a column no human moved it to. `None` leaves the column NULL.
+        # Score is 0, not 10: with no timing evidence this axis must not contribute —
+        # awarding 10/30 to every prospect is what made a real run's scores cluster at
+        # 11-12 regardless of the prospect.
+        "default": {"status": None, "detail": "No timing evidence available.", "score": 0},
     },
     "ai_adjustment": {"min": -15, "max": 15},
     "score_cap": 100,
@@ -770,7 +975,7 @@ def _deep_get(scoring: dict[str, Any], key: str) -> dict[str, Any]:
     return merged
 
 
-def _scoring_input(prospect: dict[str, Any]) -> dict[str, Any]:
+def _scoring_input(prospect: dict[str, Any], canonical: Sequence[str] | None = None) -> dict[str, Any]:
     """Extract the uniform scoring dict from a prospect.
 
     Accepts prospects produced by `discover` (carry `_internal`) OR raw lead
@@ -787,7 +992,7 @@ def _scoring_input(prospect: dict[str, Any]) -> dict[str, Any]:
         by_source = dd.get("by_source") or {}
         rows = list(by_source.values()) if by_source else []
         rows.append(prospect)  # top-level fields (raw LLM leads live here)
-        base = _merge_raw_rows(rows)
+        base = _merge_raw_rows(rows, canonical)
         if not base.get("organization_name") and prospect.get("company_name"):
             base["organization_name"] = str(prospect["company_name"]).strip()
         base["sources_found_in"] = ", ".join(dd.get("sources_found_in", [])) or base.get("sources_found_in", "")
@@ -796,6 +1001,89 @@ def _scoring_input(prospect: dict[str, Any]) -> dict[str, Any]:
     base.setdefault("source_count", prospect.get("source_count", 1))
     base.setdefault("multi_source", base["source_count"] > 1)
     return base
+
+
+_NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+
+
+def _first_number(text: str) -> float | None:
+    """First number in a free-text value: "15,273 sq ft" -> 15273.0."""
+    m = _NUMBER_RE.search(text or "")
+    if not m:
+        return None
+    try:
+        return float(m.group(0).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _factor_credit(lead: dict[str, Any], name: str, spec: dict[str, Any]) -> float:
+    """Credit in [0, 1] for one authored factor, from the data actually collected.
+
+    **Presence is the evidence.** A factor names a field the skill asked for; if the
+    field came back with a value, the factor is satisfied. `min`/`max` refine that into
+    a threshold when the config supplies one — which is how an operator's ICP bound
+    (`square_footage >= 10000`) becomes a scoring input rather than prose.
+
+    Deliberately NOT a keyword table: that is what tied the previous scorer to one
+    industry.
+    """
+    raw = lead.get(name)
+    if raw is None or not str(raw).strip():
+        norm = _norm_key(name)
+        raw = next((v for k, v in lead.items() if _norm_key(k) == norm and str(v).strip()), None)
+    text = str(raw if raw is not None else "").strip()
+    if not text:
+        return 0.0
+
+    num = _first_number(text)
+    lo, hi = spec.get("min"), spec.get("max")
+    if num is not None and (lo is not None or hi is not None):
+        try:
+            if lo is not None and num < float(lo):
+                return 0.0
+            if hi is not None and num > float(hi):
+                return 0.0
+        except (TypeError, ValueError):
+            pass
+    return 1.0
+
+
+def score_config_factors(
+    lead: dict[str, Any], factors: Any, max_points: int
+) -> tuple[int, dict[str, float]]:
+    """Score the skill's OWN authored `scoring.factors`, normalized to `max_points`.
+
+    Replaces the hardcoded `fit` keyword table. The authored factors are the ICP-fit
+    axis — which is what they always were semantically; nothing read them until
+    2026-08-12, so a model could author four weighted factors, have them validate, and
+    watch every prospect score identically off unrelated defaults.
+
+    Returns `(points, per_factor_credit)` so the breakdown is inspectable rather than a
+    single opaque number.
+    """
+    total_weight = 0.0
+    earned = 0.0
+    detail: dict[str, float] = {}
+    for spec in factors or []:
+        if not isinstance(spec, dict):
+            continue
+        name = str(spec.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            weight = float(spec.get("weight", 1) or 0)
+        except (TypeError, ValueError):
+            weight = 0.0
+        if weight <= 0:
+            continue
+        credit = _factor_credit(lead, name, spec)
+        total_weight += weight
+        earned += weight * credit
+        detail[name] = round(credit, 3)
+    if total_weight <= 0:
+        return 0, detail
+    return round((earned / total_weight) * max_points), detail
 
 
 def score_completeness(lead: dict[str, Any], cfg: dict[str, Any]) -> int:
@@ -813,12 +1101,68 @@ def score_fit(lead: dict[str, Any], cfg: dict[str, Any]) -> int:
     return min(best, cfg["max"])
 
 
+#: Name fragments that mark a field as carrying a date/timing signal. A vocabulary of
+#: *shapes*, not of an industry — "permit_date" and "estimated_timeline" both match, and
+#: nothing here names a vertical, an org or a place.
+_TIMING_NAME_HINTS = ("timeline", "date", "completion", "due", "schedule", "when")
+
+
+def timing_fields_from_authored(canonical: Sequence[str] | None) -> tuple[str, ...]:
+    """Authored fields that plausibly carry a timing signal, in authored order.
+
+    Used only when the skill does not declare `pipeline.timing_fields` itself. Ordering
+    follows the config so an operator's first-declared date field wins, and every
+    candidate is *parsed* before it is used — a non-date value simply does not match, so
+    a false positive here costs nothing.
+    """
+    hits: list[str] = []
+    for name in canonical or []:
+        norm = _norm_key(name)
+        if any(hint in norm for hint in _TIMING_NAME_HINTS) and name not in hits:
+            hits.append(str(name))
+    return tuple(hits)
+
+
+def regions_from_markets(markets: Any) -> tuple[dict[str, list[str]], list[str]]:
+    """Build the region map from the ORG's own target markets.
+
+    Returns `({region_token: [cities]}, [all market cities])`. Replaces a hardcoded
+    `regions = {}` (empty, so no region bonus was reachable at all) plus a three-entry
+    `state_aliases` table covering Texas, Colorado and Indiana — the previous customer's
+    states. A Tennessee org could not score region no matter what it collected.
+
+    **No state-name table is introduced**, deliberately: markets written as
+    "Nashville, Tennessee" cannot be bridged to a lead's "TN" without one, so the city
+    list exists to match those cases instead. Cities are the more specific signal anyway.
+    """
+    regions: dict[str, list[str]] = {}
+    cities: list[str] = []
+    for market in markets or []:
+        parts = [seg.strip().lower() for seg in str(market).split(",") if seg.strip()]
+        if not parts:
+            continue
+        city = parts[0] if len(parts) >= 2 else ""
+        token = parts[-1]
+        regions.setdefault(token, [])
+        if city:
+            if city not in regions[token]:
+                regions[token].append(city)
+            if city not in cities:
+                cities.append(city)
+    return regions, cities
+
+
 def score_region(lead: dict[str, Any], cfg: dict[str, Any]) -> int:
     regions = cfg.get("regions") or {}
-    if not regions:
+    market_cities = [str(c).lower() for c in (cfg.get("market_cities") or [])]
+    if not regions and not market_cities:
         return 0
     city = str(lead.get("city", "")).lower()
     state = str(lead.get("state", "")).lower().strip()
+    # City first: it survives a market written with a full state name, which no
+    # abbreviation lookup can resolve without a static table.
+    if city and any(c and c in city for c in market_cities):
+        return cfg["max"]
     abbr = state if len(state) == 2 else cfg.get("state_aliases", {}).get(state, "")
     if abbr in regions:
         cities = regions[abbr]
@@ -885,7 +1229,15 @@ def parse_estimated_date(text: str) -> date | None:
 
 def calculate_pipeline(lead: dict[str, Any], cfg: dict[str, Any], today: date) -> dict[str, Any]:
     lead_months = int(cfg["decision_lead_months"])
-    completion = parse_estimated_date(str(lead.get("estimated_timeline", "")))
+    # Which field carries the timing signal is the SKILL's business, not ours. This read
+    # a single hardcoded `estimated_timeline`, so a skill whose signal is `permit_date`
+    # or `replacement_due` could never score the timing axis — 30 of 100 points
+    # unreachable, silently, for every vertical that does not use that one word.
+    completion = None
+    for field in cfg.get("timing_fields") or ("estimated_timeline",):
+        completion = parse_estimated_date(str(lead.get(field, "") or ""))
+        if completion:
+            break
     if completion:
         decision = _subtract_months(completion, lead_months)
         months = _months_between(decision, today)
@@ -938,12 +1290,57 @@ def score_prospects(
     ai_cfg = _deep_get(scoring, "ai_adjustment")
     cap = int(scoring.get("score_cap", _DEFAULT_SCORING["score_cap"]))
 
+    # The fields the skill asked for. Used for BOTH the merge vocabulary and
+    # completeness: "how much of what this skill asked for did we actually get" is a
+    # question every vertical can answer, unlike a fixed field list.
+    canonical = canonical_fields_from_sources(ctx.get("sources"))
+    if not (scoring.get("completeness") or {}).get("fields"):
+        c_cfg = {**c_cfg, "fields": list(canonical) or list(_IDENTITY_ALIASES)}
+    authored_factors = scoring.get("factors")
+    #: When a skill authors its own factors they become the LARGEST axis — larger than
+    #: pipeline timing (30) — unless the config sets `fit.max` itself. The operator's
+    #: stated ICP is the best signal available about who is worth calling; leaving it at
+    #: the legacy `fit` weight of 25 made it a minority of a score dominated by axes
+    #: nobody authored. Every axis max stays overridable via `context["scoring"]`.
+    if isinstance(authored_factors, list) and authored_factors and not (
+        scoring.get("fit") or {}
+    ).get("max"):
+        f_cfg = {**f_cfg, "max": 40}
+
+    # ── org-sourced values ────────────────────────────────────────────────────
+    # Anything the engine needs that the skill config does not carry comes from the
+    # organization the scan is running FOR, never from a default.
+    org = ctx.get("organization") if isinstance(ctx.get("organization"), dict) else {}
+    if not (scoring.get("region_bonus") or {}).get("regions"):
+        derived_regions, market_cities = regions_from_markets(org.get("markets"))
+        if derived_regions or market_cities:
+            r_cfg = {**r_cfg, "regions": derived_regions, "market_cities": market_cities}
+    if not (scoring.get("pipeline") or {}).get("decision_lead_months"):
+        cycle = org.get("sales_cycle_months", ctx.get("sales_cycle_months"))
+        try:
+            cycle = int(cycle) if cycle is not None else None
+        except (TypeError, ValueError):
+            cycle = None
+        if cycle and cycle > 0:
+            p_cfg = {**p_cfg, "decision_lead_months": cycle}
+    if not (scoring.get("pipeline") or {}).get("timing_fields"):
+        derived_timing = timing_fields_from_authored(canonical)
+        if derived_timing:
+            p_cfg = {**p_cfg, "timing_fields": derived_timing}
+
     scored: list[dict[str, Any]] = []
     for p in prospects:
-        lead = _scoring_input(p)
+        lead = _scoring_input(p, canonical)
         pipeline = calculate_pipeline(lead, p_cfg, today)
         completeness = score_completeness(lead, c_cfg)
-        fit = score_fit(lead, f_cfg)
+        # Authored factors take precedence over the legacy keyword table and occupy the
+        # same axis (`fit.max`), so the 0-100 scale is unchanged.
+        if isinstance(authored_factors, list) and authored_factors:
+            fit, factor_detail = score_config_factors(
+                lead, authored_factors, int(f_cfg.get("max", 25))
+            )
+        else:
+            fit, factor_detail = score_fit(lead, f_cfg), {}
         region = score_region(lead, r_cfg)
         multi = score_multi_source(lead, m_cfg)
         timing = pipeline["score"]
@@ -955,6 +1352,22 @@ def score_prospects(
             ai_adj = 0
 
         total = max(0, min(cap, completeness + fit + region + multi + timing + ai_adj))
+
+        # `disqualify_below` — authored by CSB-built skills since day one and read by
+        # NOTHING until now. **Implemented as a FLAG, not a filter, deliberately:** the
+        # operator picked the threshold before ever seeing a score distribution, and on
+        # the first real run every prospect scored 11-12 against a threshold of 20, so
+        # filtering would have silently deleted a scan's entire yield with no error
+        # anywhere. Flagged, the operator sees both the prospects and their own cutoff
+        # and can move it. Absent/invalid threshold => no flag at all.
+        disqualified: bool | None = None
+        try:
+            floor = scoring.get("disqualify_below")
+            if floor is not None:
+                disqualified = total < float(floor)
+        except (TypeError, ValueError):
+            disqualified = None
+
         scored.append({
             "prospect_id": p.get("id"),
             "company_name": p.get("company_name") or lead.get("organization_name", ""),
@@ -967,19 +1380,21 @@ def score_prospects(
             "estimated_decision": pipeline["estimated_decision"],
             "months_to_decision": pipeline["months_to_decision"],
             "contact_name": lead.get("key_contact", ""),
-            "project_description": lead.get("project_description", ""),
-            "project_type": lead.get("project_type", ""),
-            "project_phase": lead.get("project_phase", ""),
-            "campaign_goal": lead.get("campaign_goal", ""),
-            "denomination": lead.get("denomination", ""),
-            "estimated_timeline": lead.get("estimated_timeline", ""),
+            # The fields this skill actually authored, whatever they are. Replaced six
+            # hardcoded church-AV keys (project_description/_type/_phase, campaign_goal,
+            # denomination, estimated_timeline) that no non-church skill ever populates.
+            "fields": {f: lead.get(f, "") for f in canonical},
             "sources_found_in": lead.get("sources_found_in", ""),
             "multi_source": lead.get("multi_source", False),
             "score_factors": {
                 "completeness": completeness, "fit": fit, "region_bonus": region,
                 "multi_source": multi, "pipeline_timing": timing, "is_region": region > 0,
+                # Per-factor credit for the skill's own authored factors, so an operator
+                # can see WHICH of their criteria a prospect met.
+                **({"factors": factor_detail} if factor_detail else {}),
             },
             "ai_score_adjustment": ai_adj,
+            **({"disqualified": disqualified} if disqualified is not None else {}),
         })
 
     scored.sort(key=lambda x: x["score"], reverse=True)

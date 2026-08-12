@@ -46,6 +46,14 @@ THE SELLER IS LOOKING FOR THESE IN-MARKET SIGNALS
 ANY OF THESE DISQUALIFIES THE PROSPECT OUTRIGHT
 {disqualifiers}
 
+THE SELLER'S EXPLICIT REQUIREMENTS (thresholds and constraints they stated)
+{rules}
+
+A requirement you CAN evaluate and the prospect FAILS is a disqualifier: say so in
+`disqualifiers_hit` using the requirement's own wording. A requirement you cannot
+evaluate from the evidence available is NOT a failure — leave it out and do not guess
+a value in order to judge it.
+
 Decide, using only the prospect information above plus what you can ground from
 public sources. Do not invent facts about the prospect.
 
@@ -106,6 +114,10 @@ def validate_prospects(
     """
     signals = _as_lines(validation_config.get("in_market_signals"))
     disqualifiers = _as_lines(validation_config.get("disqualifiers"))
+    # `rules` carries the operator's explicit thresholds (e.g. min_square_footage).
+    # ⚠️ It was authored by every CSB-built skill and read by NOTHING until 2026-08-12:
+    # a real run carried `min_square_footage: 10000` while the judgement never saw it.
+    rules = _as_lines(validation_config.get("rules"))
 
     if emit:
         emit({"type": "phase_start", "phase": "validation"})
@@ -117,6 +129,7 @@ def validate_prospects(
             prospect=_prospect_summary(prospect),
             signals=signals,
             disqualifiers=disqualifiers,
+            rules=rules,
         )
         raw = provider(
             prompt,
