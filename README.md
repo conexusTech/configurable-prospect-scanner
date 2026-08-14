@@ -201,4 +201,19 @@ no code change needed there).
 | `AV_SCANNER_MOCK` | no | `1` → offline provider, no model key |
 | `AV_SCANNER_PROVIDER` | no | `gemini` \| `claude` when not mocking |
 | `GEMINI_API_KEY` | when using gemini | grounded search |
-| `SCANNER_TOP_N` | no | ranking cut, default 50 |
+| `SCANNER_TOP_N` | no | default 50. Fallback for `discovery.target_prospects` and `contacts.max_prospects` when the config omits them. **Not a ranking cut on this path** — the cut lives in `FileSink.close()` and the AEO path uses `AeoEventSink`, which has no `close()`. **Not** a fallback for `discovery.max_prospects` either: at the production value of `1` that would cap every run at one prospect. |
+| `SCANNER_PHASE_CONCURRENCY` | no | width of the per-prospect phases, default **2**. The biggest single lever on run duration — location verification and validation are one grounded call per prospect each, so wall-clock ≈ `2 × prospects ÷ this × call latency` (~47 s). Raise only as far as the model key's rate limit allows; a 429's backoff costs more than the parallelism wins. |
+
+### Bounding a run
+
+Two knobs decide how long a scan takes, and they multiply:
+
+- **`discovery.max_prospects`** (skill config) — a hard ceiling on prospects per run,
+  cumulative across discovery rounds and applied *before* any prospect is persisted or
+  verified. Absent means no ceiling. This is the only real cap; see
+  `aeo/phases/prospect_budget.py` for why the three things that look like one are not.
+- **`SCANNER_PHASE_CONCURRENCY`** (env) — how many of the per-prospect calls run at once.
+
+Measured, on the run that motivated the ceiling: 262 discovered prospects at concurrency
+2 needs roughly 3.5 hours of grounded calls. The same set at concurrency 6, capped to
+100, is about 40 minutes.

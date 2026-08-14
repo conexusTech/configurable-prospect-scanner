@@ -25,6 +25,14 @@ Env (all injected by the queue in a real run):
                                and for `discovery.target_prospects` /
                                `contacts.max_prospects` when the skill config omits them.
                                The config wins; this is the deployment default only.
+                               ⚠️ It is NOT a fallback for `discovery.max_prospects` —
+                               see `_optional_config_limit`.
+  SCANNER_PHASE_CONCURRENCY  — width of the per-prospect phases (default 2). The single
+                               biggest lever on run duration: verification and validation
+                               are one grounded call per prospect each, so a scan's
+                               wall-clock is roughly 2 x prospects / this x call latency.
+                               Raise it only as far as the model key's rate limit allows —
+                               a 429 costs more in backoff than the parallelism wins.
 """
 
 from __future__ import annotations
@@ -59,6 +67,10 @@ from aeo.phases.geo_filter import (  # noqa: E402
     build_target_area,
 )
 from aeo.phases.geo_loop import DEFAULT_MAX_ROUNDS, discover_in_area  # noqa: E402
+from aeo.phases.prospect_budget import (  # noqa: E402
+    ProspectBudget,
+    capped_discover,
+)
 from aeo.phases.query_expansion import (  # noqa: E402
     DEFAULT_MAX_QUERIES_PER_SOURCE,
     MARKET_PLACEHOLDER,
@@ -265,6 +277,21 @@ def selected_phases(raw: str | None) -> list[str]:
 _ENV_LIMIT_FALLBACK = "SCANNER_TOP_N"
 
 
+def _raw_positive_int(config: dict[str, Any], section: str, key: str) -> int | None:
+    """`config[section][key]` as a positive int, or `None` if absent/unusable.
+
+    The shared half of the two limit readers below. They differ only in what an
+    absent value MEANS, which is the part worth having two names for.
+    """
+    block = config.get(section)
+    raw = block.get(key) if isinstance(block, dict) else None
+    try:
+        value = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def _config_limit(config: dict[str, Any], section: str, key: str, default: int = 50) -> int:
     """A run limit, **from the skill config first, the environment only as a fallback.**
 
@@ -276,18 +303,28 @@ def _config_limit(config: dict[str, Any], section: str, key: str, default: int =
     exactly one prospect of fourteen, which read as "the model found little" rather than
     "we stopped looking".
     """
-    block = config.get(section)
-    raw = block.get(key) if isinstance(block, dict) else None
-    try:
-        value = int(raw)
-        if value > 0:
-            return value
-    except (TypeError, ValueError):
-        pass
+    authored = _raw_positive_int(config, section, key)
+    if authored is not None:
+        return authored
     try:
         return max(1, int(os.environ.get(_ENV_LIMIT_FALLBACK, str(default))))
     except (TypeError, ValueError):
         return default
+
+
+def _optional_config_limit(
+    config: dict[str, Any], section: str, key: str
+) -> int | None:
+    """A positive integer limit from the skill config, or `None` when it is absent.
+
+    ⚠️ **Deliberately does NOT fall back to `SCANNER_TOP_N` the way `_config_limit`
+    does.** A ceiling is a decision, and that variable is set to **1** in production —
+    so borrowing it as a default would cap every run at a single prospect while
+    looking like a sensible fallback, and the symptom (one prospect, no error) is
+    indistinguishable from a market with nothing in it. An absent ceiling means "no
+    ceiling".
+    """
+    return _raw_positive_int(config, section, key)
 
 
 def _top_ranked(
@@ -505,14 +542,34 @@ def main() -> int:
             total = sum(len(s.get("queries") or []) for s in tool_context["sources"].values())
             _log(f"expanded to {total} geo-anchored query/queries across {len(markets)} market(s)")
 
-        def _discover(ctx: dict[str, Any]) -> list[dict[str, Any]]:
-            return als.discover(
+        # The run's prospect ceiling. Cumulative across rounds, applied before any
+        # prospect becomes durable — see aeo/phases/prospect_budget.py for why it
+        # cannot be a truncation of `discover`'s return value.
+        budget = ProspectBudget(
+            _optional_config_limit(config, "discovery", "max_prospects")
+        )
+        if budget.unbounded:
+            _log(
+                "no prospect ceiling (discovery.max_prospects unset) — every "
+                "discovered prospect will be verified, validated and scored"
+            )
+        else:
+            _log(f"prospect ceiling: {budget.remaining} for this run")
+
+        # `emit` is threaded through rather than closed over, because the ceiling has
+        # to intercept the engine's `prospects` event before it reaches the sink.
+        _discover = capped_discover(
+            lambda ctx, emit: als.discover(
                 ctx,
                 scan_run_id=scan_run_id,
                 provider=provider,
-                emit=sink.emit,
+                emit=emit,
                 provider_config=provider_config,
-            )
+            ),
+            budget=budget,
+            emit=sink.emit,
+            log=_log,
+        )
 
         geo_rejects: list[dict[str, Any]] = []
         if area.is_empty:
