@@ -89,6 +89,7 @@ def verify_locations(
     provider: Callable[..., str],
     provider_config: dict[str, Any],
     parse_json_array: Callable[[str], list[dict[str, Any]]],
+    log: Callable[[str], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Establish each prospect's real address. Returns `{id: {city, state, zip_code, …}}`.
 
@@ -116,6 +117,8 @@ def verify_locations(
         _verify,
         max_concurrency=concurrency_from(provider_config),
         timeout_s=DEFAULT_CALL_TIMEOUT_S,
+        log=log,
+        label='address verification',
     )
 
     verified: dict[str, dict[str, Any]] = {}
@@ -240,6 +243,10 @@ def discover_in_area(
                 provider=provider,
                 provider_config=provider_config,
                 parse_json_array=parse_json_array,
+                # The round log only prints once this returns, so without a
+                # heartbeat here a long verification pass is indistinguishable from
+                # a hang — see `map_bounded`.
+                log=log,
             )
             if unconfirmed
             else {}

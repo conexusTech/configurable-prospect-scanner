@@ -57,13 +57,51 @@ def map_bounded(
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
     timeout_s: float = DEFAULT_CALL_TIMEOUT_S,
     on_error: Callable[[T, BaseException], None] | None = None,
+    log: Callable[[str], None] | None = None,
+    label: str = "items",
 ) -> list[R | None]:
-    """Apply `fn` across `items`, order-preserving. `None` where it failed or timed out."""
+    """Apply `fn` across `items`, order-preserving. `None` where it failed or timed out.
+
+    `log` + `label` emit a progress heartbeat, and it is not cosmetic.
+
+    ⚠️ **The heartbeat measures liveness, NOT per-call latency — do not derive one.**
+    The result walk below is in **submission order**, not completion order, so a slow
+    call at position *n* blocks counting every already-finished future behind it. The
+    deltas between heartbeats then look like this (measured, run `c29a65d5`):
+
+        start -> 10/100  +191.0s
+        10 -> 20/100     +138.7s
+        20 -> 30/100     +  0.0s      <- 10 calls "in" zero seconds
+        30 -> 40/100     +  0.0s
+
+    Those zeroes are the artefact: three batches' worth of work reported in one
+    instant. A per-call figure computed from any single interval is wrong, and it was
+    wrong by ~2.4x when first tried. **Use total wall-clock for the batch** — that is
+    the only honest throughput number here.
+
+    Every per-prospect phase runs through here at `DEFAULT_MAX_CONCURRENCY = 2`, so a
+    long candidate list is minutes of total silence: the caller logs once when the
+    phase ends, and nothing while it runs. On run `cab8c68c` that produced **81
+    minutes with the log frozen at 11 lines**, which read as "scoring hangs" for most
+    of a day — scoring was never reached, and the arithmetic (249 candidates / 2
+    workers x one grounded call each) accounts for the whole gap. A phase that cannot
+    say "20/249" cannot be told apart from a phase that is wedged.
+    """
     if not items:
         return []
 
     workers = max(1, min(max_concurrency, len(items)))
     results: list[R | None] = [None] * len(items)
+    total = len(items)
+    # Roughly ten heartbeats per phase: frequent enough to distinguish slow from
+    # stuck, sparse enough not to swamp a log that operators grep.
+    every = max(1, total // 10)
+    done = 0
+    if log:
+        log(
+            f"{label}: starting {total} call(s) at concurrency {workers} "
+            f"(timeout {int(timeout_s)}s each)"
+        )
 
     # NOT a `with` block, deliberately. `ThreadPoolExecutor.__exit__` calls
     # `shutdown(wait=True)`, which joins every worker — so a thread still blocked
@@ -83,6 +121,13 @@ def map_bounded(
             except Exception as exc:  # noqa: BLE001 — one item must not fail a phase
                 if on_error:
                     on_error(items[index], exc)
+            finally:
+                # Counted in `finally` so a timed-out or failed call still advances
+                # the heartbeat. Counting only successes would stall the progress
+                # line during exactly the failure it exists to make visible.
+                done += 1
+                if log and (done % every == 0 or done == total):
+                    log(f"{label}: {done}/{total} complete")
     finally:
         # Don't wait on stragglers. ⚠️ Python cannot kill a running thread, and
         # since 3.9 the executor's threads are non-daemon and joined at interpreter

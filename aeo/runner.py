@@ -642,7 +642,15 @@ def main() -> int:
             ]
             _log(f"kept {len(prospects)}/{before} prospects after geography + validation")
 
+        # Bracketed because the absence of a log here was read for most of a day as
+        # "scoring hangs". It does not: `score_prospects` is pure arithmetic over the
+        # already-collected set. The silence belonged to the per-candidate address
+        # verification above (concurrency 2, one grounded call each), which on run
+        # `cab8c68c` spent 81 minutes on 249 candidates and never reached this line.
+        # These two lines make that distinction readable from the log alone.
+        _log(f"scoring {len(prospects)} prospect(s)")
         scored = als.score_prospects(prospects, tool_context, today=today)
+        _log(f"scored {len(scored)} prospect(s)")
 
         # ── contacts ──────────────────────────────────────────────────────
         # After scoring, deliberately: contact search is the most expensive call
