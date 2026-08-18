@@ -35,6 +35,55 @@ from typing import Any
 # planning_board), so requiring it would reject a legitimate config.
 SOURCE_REQUIRED_KEYS = ("name_field", "fields", "queries")
 
+#: Record fields every vertical has, appended to whatever a skill authored.
+#:
+#: AEO declares `website` and `industry` on its prospect callback, `PROSPECT_PASSTHROUGH`
+#: already names both, and the engine already resolves them onto columns — `website` via
+#: `_IDENTITY_ALIASES["website_url"]`, `industry` under its authored name. All of that was
+#: in place and still produced NULL columns, because a source only receives what it ASKS
+#: the model for, and two skills in a row asked for neither: `commercial-flooring` and
+#: `commercial-hvac-mechanical-services` (the live production skill). Measured on a real
+#: run after adding them to one config: website 0/60 -> 58/60, industry 0/60 -> 60/60.
+#:
+#: Appended here rather than left to per-skill authoring because the requirement is not a
+#: vertical judgement — it is a property of AEO's `prospects` table, so N configs is N
+#: chances to forget, and forgetting is silent (a NULL column on a scan that reports
+#: success). The builder authoring it instead would fix only skills written afterwards,
+#: probabilistically, while every existing skill stayed broken.
+#:
+#: ⚠️ This is NOT the default that design rule 1 forbids. That rule is about **who gets
+#: scanned** — queries and seed firms — where a default is "a wrong answer wearing a
+#: confident face". This changes only what is captured about a record already discovered,
+#: and it mirrors what the engine does for city / state / zip_code / contact_title
+#: regardless of what a skill authored.
+UNIVERSAL_RECORD_FIELDS = ("website", "industry")
+
+#: Spellings the engine already folds into `website_url` (`_IDENTITY_ALIASES`). If a skill
+#: authored any of them, asking again as `website` would duplicate the key in the prompt.
+_WEBSITE_SPELLINGS = frozenset({"websiteurl", "website", "url", "domain"})
+
+
+def _norm_field(name: Any) -> str:
+    """Case- and punctuation-insensitive field-name key, matching how the engine's
+    `_norm_key` compares authored names against what a model returns."""
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+
+def with_universal_fields(fields: Any) -> list[str]:
+    """Authored fields, plus any UNIVERSAL_RECORD_FIELDS the skill did not already ask
+    for. Order is preserved and the authored names win — appended, never substituted."""
+    out = [str(f) for f in (fields or [])]
+    seen = {_norm_field(f) for f in out}
+    for extra in UNIVERSAL_RECORD_FIELDS:
+        if extra == "website" and (seen & _WEBSITE_SPELLINGS):
+            continue
+        if _norm_field(extra) in seen:
+            continue
+        out.append(extra)
+        seen.add(_norm_field(extra))
+    return out
+
+
 # Provider defaults. `model`, `temperature` and `retry_attempts` are deliberately NOT
 # read from the skill config: they are deployment concerns that change with our
 # infrastructure, not authoring decisions an operator made in a chat.
@@ -349,7 +398,9 @@ def _with_geo_strict_prompt(
         if source.get("prompt"):
             out[name] = source
             continue
-        fields = source.get("fields") or ["organization_name", "city", "state"]
+        fields = with_universal_fields(
+            source.get("fields") or ["organization_name", "city", "state"]
+        )
         out[name] = {
             **source,
             "prompt": GEO_STRICT_PROMPT.replace(

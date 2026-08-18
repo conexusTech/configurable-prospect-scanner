@@ -14,6 +14,8 @@ from aeo.config_mapping import (
     UnmappedConfigError,
     build_tool_context,
     unsupported_authored_sections,
+    with_universal_fields,
+    _with_geo_strict_prompt,
 )
 
 
@@ -213,3 +215,63 @@ class TestSeedFirmFanOut:
         ctx["skill"]["config"]["discovery"]["lookalike_sources"] = "Only One"
         out = build_tool_context(ctx)
         assert out["sources"]["church_architects"]["seed_firms"] == ["Only One"]
+
+
+class TestUniversalRecordFields:
+    """Regression: `website` and `industry` reached no column on two consecutive skills.
+
+    Everything downstream was already wired (PROSPECT_PASSTHROUGH names both, the engine
+    resolves website via _IDENTITY_ALIASES) — a source only receives what it ASKS for, and
+    neither skill asked. Appended by the mapper so it cannot be forgotten per skill.
+    """
+
+    @staticmethod
+    def _prompt_for(fields):
+        out = _with_geo_strict_prompt(
+            {"permits": {"name_field": "company_name", "fields": fields, "queries": ["q"]}},
+            "commercial flooring",
+        )
+        return out["permits"]["prompt"]
+
+    def test_appends_website_and_industry_to_the_prompt_keys(self):
+        prompt = self._prompt_for(["company_name", "location"])
+        assert "website" in prompt, "website was never asked for"
+        assert "industry" in prompt, "industry was never asked for"
+
+    def test_preserves_the_authored_fields_and_their_order(self):
+        got = with_universal_fields(["company_name", "signal_type", "location"])
+        assert got[:3] == ["company_name", "signal_type", "location"]
+        assert got[3:] == ["website", "industry"]
+
+    def test_does_not_duplicate_an_alias_the_engine_already_folds(self):
+        # `website_url` / `url` / `domain` all resolve to website_url upstream, so asking
+        # again as `website` would put two equivalent keys in one prompt.
+        for spelling in ("website_url", "url", "domain", "Website"):
+            got = with_universal_fields(["company_name", spelling])
+            assert got.count("website") == 0, f"{spelling} should suppress the append"
+            assert "industry" in got
+
+    def test_does_not_duplicate_an_authored_industry(self):
+        got = with_universal_fields(["company_name", "industry"])
+        assert got.count("industry") == 1
+
+    def test_covers_the_absent_fields_fallback_too(self):
+        # The `or [...]` fallback had the identical gap.
+        prompt = self._prompt_for(None)
+        assert "website" in prompt and "industry" in prompt
+
+    def test_an_authored_prompt_is_left_alone(self):
+        # A source that ships its own prompt is passed through untouched — we must not
+        # rewrite an operator's literal prompt to inject keys.
+        out = _with_geo_strict_prompt(
+            {
+                "custom": {
+                    "name_field": "company_name",
+                    "fields": ["company_name"],
+                    "queries": ["q"],
+                    "prompt": "my own prompt",
+                }
+            },
+            "x",
+        )
+        assert out["custom"]["prompt"] == "my own prompt"
