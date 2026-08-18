@@ -200,3 +200,48 @@ class TestPhaseNames:
     def test_unknown_phase_never_yields_empty(self):
         assert phase_name_for("") == "Unknown"
         assert phase_name_for("municipal_permits") == "Municipal permits"
+
+
+class TestScoredContactPassthrough:
+    """Regression: a run found 17 contacts and persisted 17 names, zero emails.
+
+    `aeo/phases/contacts.py` writes all five contact fields onto the prospect and
+    AEO's `ScanScoredItemDto` declares all five, but `SCORED_PASSTHROUGH` named only
+    `contact_name` — so the whitelist silently dropped the rest. Asserting each field
+    individually so a future trim of the tuple names the field it broke.
+    """
+
+    ITEM = {
+        "prospect_id": "11111111-1111-1111-1111-111111111111",
+        "contact_name": "Jeff Lewis",
+        "contact_title": "Facilities Director",
+        "contact_email": "jeff@example.com",
+        "contact_phone": "+1-803-555-0100",
+        "contact_linkedin": "https://www.linkedin.com/in/jefflewis",
+        "contacts_data": {"guess": {"contact_email": "j.lewis@example.com"}},
+        "score": 76,
+        "rank": 1,
+    }
+
+    def _mapped(self):
+        out = map_scored_event({"type": "scored", "items": [dict(self.ITEM)]})
+        assert len(out) == 1 and len(out[0]["data"]) == 1
+        return out[0]["data"][0]
+
+    def test_every_column_backed_contact_field_reaches_the_payload(self):
+        got = self._mapped()
+        for field in (
+            "contact_name",
+            "contact_title",
+            "contact_email",
+            "contact_phone",
+            "contact_linkedin",
+        ):
+            assert got.get(field) == self.ITEM[field], f"{field} was dropped"
+
+    def test_contacts_data_survives_as_an_object(self):
+        assert self._mapped().get("contacts_data") == self.ITEM["contacts_data"]
+
+    def test_scoring_fields_still_pass(self):
+        got = self._mapped()
+        assert got["score"] == 76 and got["rank"] == 1

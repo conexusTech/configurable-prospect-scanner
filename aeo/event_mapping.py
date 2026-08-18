@@ -37,9 +37,22 @@ PHASE_NAMES = {
 
 # Fields on the engine's `scored` item that AEO's ScanScoredItemDto declares
 # top-level. Everything else is folded into `scoring_payload`.
+#
+#: ⚠️ Same hazard as PROSPECT_PASSTHROUGH below, and it bit twice. The five contact
+#: fields were added 2026-08-18: `aeo/phases/contacts.py` writes `contact_title` /
+#: `contact_email` / `contact_phone` / `contact_linkedin` / `contacts_data` onto every
+#: prospect it enriches, AEO's `ScanScoredItemDto` declares all five and the ingest
+#: UPSERTs them — but this tuple named only `contact_name`, so a run that found 17
+#: contacts persisted 17 names and zero emails. `contact_name` arriving while the other
+#: five did not is the fingerprint of this bug: one whitelist, one field listed.
 SCORED_PASSTHROUGH = (
     "prospect_id",
     "contact_name",
+    "contact_title",
+    "contact_email",
+    "contact_phone",
+    "contact_linkedin",
+    "contacts_data",
     "score",
     "rank",
     "score_factors",
