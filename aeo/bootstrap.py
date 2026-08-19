@@ -94,6 +94,13 @@ def job_from_payload(payload: dict[str, Any]) -> dict[str, str]:
     if isinstance(phases, list) and phases:
         resolved["PHASES"] = ",".join(str(p) for p in phases)
 
+    # Test-mode marker, mapped through only when the gateway said so with a real
+    # boolean. The consumer clamps the prospect ceiling on it, so an absent, false, or
+    # non-boolean `test` must read as a REAL run and leave the configured ceiling alone
+    # — getting this default backwards would silently cap production scans.
+    if payload.get("test") is True:
+        resolved["SCAN_IS_TEST"] = "true"
+
     return {k: str(v) for k, v in resolved.items() if v}
 
 

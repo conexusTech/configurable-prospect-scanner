@@ -312,6 +312,53 @@ def _config_limit(config: dict[str, Any], section: str, key: str, default: int =
         return default
 
 
+#: Prospect ceiling applied to TEST runs only, and only ever downward.
+#:
+#: A test exists to prove the pipeline and the config, not to produce volume, and the
+#: cost is almost entirely per-prospect: address verification is one grounded call each
+#: at ~44s, so the ceiling is what sets the tail. Measured on production run `29a75f94`
+#: (Resource Floor Care, 150 prospects): 7m03s discovery + 13m52s verification =
+#: 20m55s. The same run capped here spends ~1m30s verifying.
+#:
+#: ⚠️ It does NOT shorten discovery — the ceiling is applied *after* discovery has found
+#: its candidates (that run discovered 377 and kept 150), so a capped test still pays
+#: the full search cost. Shortening that means fewer markets or queries, which changes
+#: what the test actually exercises.
+TEST_RUN_MAX_PROSPECTS = 15
+
+
+def _resolve_prospect_ceiling(
+    config: dict[str, Any], is_test: bool
+) -> tuple[int | None, str]:
+    """The run's prospect ceiling, plus a phrase explaining which rule produced it.
+
+    Returns `(limit, reason)`, where `None` means unbounded.
+
+    **A real run returns exactly what the skill configured, untouched.** This function
+    must not be able to lower a production ceiling; only `is_test` opens that door, and
+    only via `min`. A skill deliberately configured below the cap keeps its own number
+    rather than being raised to it, and an unbounded config *does* get the cap — an
+    unbounded test run is the case this exists to prevent.
+    """
+    configured = _optional_config_limit(config, "discovery", "max_prospects")
+    if not is_test:
+        return configured, "skill config"
+    if configured is None:
+        return (
+            TEST_RUN_MAX_PROSPECTS,
+            f"test run, skill declared no ceiling, using {TEST_RUN_MAX_PROSPECTS}",
+        )
+    if configured <= TEST_RUN_MAX_PROSPECTS:
+        return (
+            configured,
+            f"test run, skill's {configured} already at or below the {TEST_RUN_MAX_PROSPECTS} test cap",
+        )
+    return (
+        TEST_RUN_MAX_PROSPECTS,
+        f"test run, capped down from the skill's {configured}",
+    )
+
+
 def _optional_config_limit(
     config: dict[str, Any], section: str, key: str
 ) -> int | None:
@@ -366,6 +413,11 @@ def main() -> int:
     scan_run_id = _resolve("SCAN_RUN_ID")
     backend_url = os.environ.get("AEO_BACKEND_URL")
     skill_slug = _resolve("SKILL_SLUG")
+    # Strictly opt-in: only the exact string the gateway maps counts as a test. Absent,
+    # "false", "0", or a typo all read as a REAL run — the only thing this flag does is
+    # lower the prospect ceiling, so defaulting it the other way would quietly cap
+    # production scans.
+    is_test = (_resolve("SCAN_IS_TEST") or "").strip().lower() == "true"
 
     missing = [
         name
@@ -545,16 +597,17 @@ def main() -> int:
         # The run's prospect ceiling. Cumulative across rounds, applied before any
         # prospect becomes durable — see aeo/phases/prospect_budget.py for why it
         # cannot be a truncation of `discover`'s return value.
-        budget = ProspectBudget(
-            _optional_config_limit(config, "discovery", "max_prospects")
-        )
+        ceiling, ceiling_reason = _resolve_prospect_ceiling(config, is_test)
+        budget = ProspectBudget(ceiling)
         if budget.unbounded:
             _log(
                 "no prospect ceiling (discovery.max_prospects unset) — every "
                 "discovered prospect will be verified, validated and scored"
             )
         else:
-            _log(f"prospect ceiling: {budget.remaining} for this run")
+            _log(
+                f"prospect ceiling: {budget.remaining} for this run ({ceiling_reason})"
+            )
 
         # `emit` is threaded through rather than closed over, because the ceiling has
         # to intercept the engine's `prospects` event before it reaches the sink.
