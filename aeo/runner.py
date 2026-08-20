@@ -316,9 +316,16 @@ def _config_limit(config: dict[str, Any], section: str, key: str, default: int =
 #:
 #: A test exists to prove the pipeline and the config, not to produce volume, and the
 #: cost is almost entirely per-prospect: address verification is one grounded call each
-#: at ~44s, so the ceiling is what sets the tail. Measured on production run `29a75f94`
+#: at ~44s, so the ceiling is what sets the tail. Measured on run `29a75f94`
 #: (Resource Floor Care, 150 prospects): 7m03s discovery + 13m52s verification =
 #: 20m55s. The same run capped here spends ~1m30s verifying.
+#:
+#: ⚠️ That run is `test = t`, and it PREDATES this cap — which is why it produced 150.
+#: An earlier version of this note called it a "production run"; it is a run in
+#: production *data*, not a real (uncapped) one, and aeo-agent-service mirrored the
+#: wrong label into their source before it was caught. Reproducing `150 in 20m55s`
+#: with a test run today yields **15**, so anyone re-deriving the budget from this
+#: number must use a run with `test = f`.
 #:
 #: ⚠️ It does NOT shorten discovery — the ceiling is applied *after* discovery has found
 #: its candidates (that run discovered 377 and kept 150), so a capped test still pays
