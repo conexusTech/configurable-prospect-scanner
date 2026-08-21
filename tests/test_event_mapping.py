@@ -245,3 +245,90 @@ class TestScoredContactPassthrough:
     def test_scoring_fields_still_pass(self):
         got = self._mapped()
         assert got["score"] == 76 and got["rank"] == 1
+
+class TestWhitelistParity:
+    """🔴 The bug that has shipped from `SCORED_PASSTHROUGH` three times.
+
+    Once as `contact_name` alone -- a run found 17 contacts and persisted 17 names and
+    zero emails. Once as `industry`/`website`, collected on every prospect and NULL in
+    both columns. Once as `ai_analysis`/`ai_score_adjustment`, which would have made the
+    model reasoning computed, paid for, and dropped one line before the wire.
+
+    The pattern is identical every time: a field the engine produces, a column AEO
+    declares, and one tuple in the middle that does not name it. Nothing errors.
+
+    So this asserts PARITY rather than a list. A new field is either whitelisted or
+    named here as deliberately excluded -- both are fine, silence is not.
+    """
+
+    #: Fields the engine puts on a scored item that AEO deliberately does NOT persist.
+    #: Each needs a reason, because "we forgot" and "we chose not to" look identical in
+    #: a diff a year later.
+    DELIBERATELY_EXCLUDED = {
+        # AEO derives its own ordering from `score`; a second one would drift.
+        "company_name": "AEO already holds it from the prospects event",
+        "city": "same",
+        "state": "same",
+        "contact_name": "carried, but as a top-level item field not via scoring",
+        "pipeline_detail": "AEO has no column; the reasoning goes to ai_analysis",
+        "estimated_completion": "no column",
+        "estimated_decision": "no column",
+        "months_to_decision": "no column",
+        "fields": "AEO holds the authored fields in discovery_data",
+        "sources_found_in": "AEO holds it on the prospect row",
+        "multi_source": "derivable from sources_found_in",
+        "disqualified": "carried on the validations event, not scoring",
+        # NOT an omission: `pipeline_status` rides inside `scoring_payload`, which is
+        # the DESIGNED channel (corrected 2026-08-04 after a live run -- an earlier
+        # version of event_mapping.py called it a name collision and warned against
+        # mapping it, which was wrong). The gateway reads
+        # `scoring_payload.pipeline_status`, not a top-level field.
+        "pipeline_status": "designed channel is scoring_payload, not top-level",
+        "_ai_judgment": "internal handoff between the phase and the engine",
+        "stage_score": "internal: feeds the engine's axis, not a column",
+    }
+
+    def test_every_scored_field_is_whitelisted_or_deliberately_excluded(self):
+        import datetime
+
+        import av_lead_scanner as als
+        from aeo.event_mapping import SCORED_PASSTHROUGH
+
+        scored = als.score_prospects(
+            [
+                {
+                    "id": "p1",
+                    "company_name": "Acme Floors",
+                    "_ai_judgment": {
+                        "pipeline_status": "4 - Active Pursuit",
+                        "stage_score": 30,
+                        "ai_analysis": "permit six months ago",
+                        "ai_score_adjustment": 5,
+                    },
+                }
+            ],
+            {
+                "organization": {"name": "Seller", "markets": []},
+                "scoring": {"region_bonus": {"max": 10}},
+                "sources": {},
+            },
+            today=datetime.date(2026, 8, 21),
+        )
+        assert scored, "no scored item to inspect"
+
+        produced = set(scored[0])
+        unaccounted = produced - set(SCORED_PASSTHROUGH) - set(self.DELIBERATELY_EXCLUDED)
+        assert not unaccounted, (
+            "scored fields that reach neither AEO nor this exclusion list: "
+            f"{sorted(unaccounted)}. Add them to SCORED_PASSTHROUGH if AEO has a "
+            "column, or to DELIBERATELY_EXCLUDED with a reason. This is the fourth "
+            "occurrence of the same omission if you skip it."
+        )
+
+    def test_the_ai_fields_specifically_reach_the_wire(self):
+        # Named separately from the parity check: parity would also pass if someone
+        # "fixed" it by adding them to the exclusion list instead.
+        from aeo.event_mapping import SCORED_PASSTHROUGH
+
+        assert "ai_analysis" in SCORED_PASSTHROUGH
+        assert "ai_score_adjustment" in SCORED_PASSTHROUGH

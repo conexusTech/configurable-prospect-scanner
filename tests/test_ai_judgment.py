@@ -305,3 +305,98 @@ class TestModelTier:
         # deploy, so sales stages would shift with nothing in the diff to explain it.
         assert not tier.endswith("-latest"), "pin the id; never a floating alias"
         assert tier != DEFAULT_PROVIDER["model"], "the second tier must actually differ"
+
+class TestEnginePrefersTheJudgement:
+    """The vendored-engine edit (UPSTREAM.md, 2026-08-21).
+
+    The stage AND its scoring weight must move together. Overwriting only the stage
+    leaves the axis scored from the ladder we are replacing — a prospect reading
+    "Decision Imminent" while carrying the 2-point "Too Late" weight.
+    """
+
+    CTX = {
+        "organization": {"name": "Seller", "markets": []},
+        "scoring": {"region_bonus": {"max": 10}},
+        "sources": {},
+    }
+
+    def _score(self, prospect):
+        import datetime
+
+        import av_lead_scanner as als
+
+        return als.score_prospects(
+            [prospect], self.CTX, today=datetime.date(2026, 8, 21)
+        )[0]
+
+    def test_a_judged_stage_replaces_the_ladders(self):
+        item = self._score(
+            {
+                "id": "p1",
+                "company_name": "A All in One",
+                "_ai_judgment": {
+                    "pipeline_status": "6 - Likely Awarded",
+                    "stage_score": 8,
+                    "ai_analysis": "Permit 6 months ago; contractor likely selected.",
+                },
+            }
+        )
+        assert item["pipeline_status"] == "6 - Likely Awarded"
+
+    def test_the_scoring_axis_follows_the_STAGE_not_the_ladder(self):
+        # The reason this had to be an engine edit rather than a post-process.
+        item = self._score(
+            {
+                "id": "p1",
+                "_ai_judgment": {"pipeline_status": "6 - Likely Awarded", "stage_score": 8},
+            }
+        )
+        assert item["score_factors"]["pipeline_timing"] == 8
+
+    def test_falls_back_to_the_engines_own_weights_when_the_vocabulary_omits_one(self):
+        # A declared vocabulary need not weight its rungs; the engine's `statuses`
+        # table covers the shared ladder's keys.
+        item = self._score(
+            {"id": "p1", "_ai_judgment": {"pipeline_status": "4 - Active Pursuit"}}
+        )
+        assert item["pipeline_status"] == "4 - Active Pursuit"
+        assert item["score_factors"]["pipeline_timing"] == 30
+
+    def test_an_unweighted_unknown_stage_scores_zero_rather_than_borrowing(self):
+        item = self._score(
+            {"id": "p1", "_ai_judgment": {"pipeline_status": "Warm Lead"}}
+        )
+        assert item["pipeline_status"] == "Warm Lead"
+        assert item["score_factors"]["pipeline_timing"] == 0
+
+    def test_the_reasoning_reaches_pipeline_detail(self):
+        item = self._score(
+            {
+                "id": "p1",
+                "_ai_judgment": {
+                    "pipeline_status": "4 - Active Pursuit",
+                    "ai_analysis": "Lease signed last month; fit-out ahead.",
+                },
+            }
+        )
+        assert item["pipeline_detail"] == "Lease signed last month; fit-out ahead."
+
+    def test_no_judgement_leaves_calculate_pipeline_in_charge(self):
+        # The fallback that makes a failed model call degrade to previous behaviour
+        # rather than to nothing.
+        item = self._score({"id": "p1", "estimated_timeline": "completion 2028"})
+        # Asserting the LADDER RAN, not which rung it picked: the rung depends on the
+        # sales-cycle subtraction, and pinning it here would make this a test of
+        # `calculate_pipeline` arithmetic rather than of the fallback path.
+        assert item["pipeline_status"] in {s["key"] for s in PIPELINE["stages"]} | {
+            "2 - Relationship Building", "3 - Design Influence", "6 - Likely Awarded"
+        }
+        assert "Est. completion" in item["pipeline_detail"], (
+            "the ladder formats its own detail; model reasoning would not"
+        )
+
+    def test_the_adjustment_the_phase_supplies_reaches_the_item(self):
+        # `ai_score_adjustment` is the field the engine ALREADY read and nothing ever
+        # supplied — which is why ai_analysis was NULL on all 131 rows of the last run.
+        item = self._score({"id": "p1", "ai_score_adjustment": -10})
+        assert item["ai_score_adjustment"] == -10

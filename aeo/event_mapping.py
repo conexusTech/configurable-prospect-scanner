@@ -56,6 +56,13 @@ SCORED_PASSTHROUGH = (
     "score",
     "rank",
     "score_factors",
+    # Added 2026-08-21 with the AI judgment phase, and the THIRD time this exact
+    # omission has shipped from this one tuple -- after `contact_name` alone (17
+    # contacts persisted, zero emails) and after `industry`/`website`. AEO declares
+    # both on `ScanScoredItemDto` and the callback UPSERTs both; without them the
+    # model reasoning is computed, paid for, and dropped one line before the wire.
+    "ai_analysis",
+    "ai_score_adjustment",
 )
 
 # Fields on the engine's `prospects` item that map straight onto AEO columns.

@@ -59,7 +59,12 @@ from aeo.phases._concurrent import (
 
 #: Fields this phase produces per prospect. Named so the shape is a contract rather
 #: than whatever the model happened to return.
-JUDGMENT_FIELDS = ("pipeline_status", "ai_analysis", "ai_score_adjustment")
+JUDGMENT_FIELDS = (
+    "pipeline_status",
+    "stage_score",
+    "ai_analysis",
+    "ai_score_adjustment",
+)
 
 #: Prospects per model call. **1 by ruling, not by accident.**
 #:
@@ -225,6 +230,12 @@ def judge_prospects(
         return {}
 
     valid_keys = {str(s["key"]) for s in stages}
+    # Weight per rung, so the SCORE the engine assigns matches the STAGE the judge
+    # chose. Absent means the vocabulary does not weight its rungs; the engine then
+    # falls back to its own table rather than inventing a number.
+    stage_scores = {
+        str(s["key"]): s.get("score") for s in stages if s.get("score") is not None
+    }
     entry_key = str(stages[0]["key"])
     signal_fields = [
         str(f) for f in (pipeline.get("signal_fields") or ["trigger_date", "transaction_date"])
@@ -309,6 +320,7 @@ def judge_prospects(
 
             judged[pid] = {
                 "pipeline_status": stage,
+                "stage_score": stage_scores.get(stage),
                 "ai_analysis": reasoning or None,
                 "ai_score_adjustment": adj,
             }

@@ -1227,6 +1227,54 @@ def parse_estimated_date(text: str) -> date | None:
     return None
 
 
+def _pipeline_from_judgment(
+    prospect: dict[str, Any], cfg: dict[str, Any]
+) -> dict[str, Any] | None:
+    """A model-decided stage in `calculate_pipeline`'s return shape, or None.
+
+    ⚠️ **VENDORED-ENGINE ADDITION** — see UPSTREAM.md. Attached by
+    `aeo/phases/ai_judgment.py` as `prospect["_ai_judgment"]`.
+
+    The scoring axis is taken from the STAGE the judge chose, not recomputed from a
+    date. That consistency is the point: score the axis from the ladder while the label
+    comes from the judge and the two disagree on the same row — a prospect reading
+    "Decision Imminent" while carrying the 2-point "Too Late" weight.
+
+    A stage the vocabulary does not weight (`score` absent) contributes 0 rather than
+    borrowing a number from a rung it does not have. `pipeline_detail` carries the
+    model's own reasoning, so the "why" survives into `score_factors` and the event log
+    even before `ai_analysis` reaches its column.
+    """
+    judged = prospect.get("_ai_judgment")
+    if not isinstance(judged, dict):
+        return None
+    stage = judged.get("pipeline_status")
+    if not stage:
+        return None
+
+    # Prefer the weight AEO shipped with the rung; fall back to the engine's own
+    # `statuses` table, whose keys match the shared ladder.
+    score = judged.get("stage_score")
+    if score is None:
+        for entry in cfg.get("statuses") or []:
+            if len(entry) >= 4 and entry[2] == stage:
+                score = entry[4] if len(entry) > 4 else 0
+                break
+    try:
+        score = int(score) if score is not None else 0
+    except (TypeError, ValueError):
+        score = 0
+
+    return {
+        "pipeline_status": stage,
+        "pipeline_detail": judged.get("ai_analysis") or "Stage judged by model.",
+        "months_to_decision": None,
+        "estimated_completion": "Unknown",
+        "estimated_decision": "Unknown",
+        "score": min(max(score, 0), int(cfg.get("max", 30))),
+    }
+
+
 def calculate_pipeline(lead: dict[str, Any], cfg: dict[str, Any], today: date) -> dict[str, Any]:
     lead_months = int(cfg["decision_lead_months"])
     # Which field carries the timing signal is the SKILL's business, not ours. This read
@@ -1331,7 +1379,20 @@ def score_prospects(
     scored: list[dict[str, Any]] = []
     for p in prospects:
         lead = _scoring_input(p, canonical)
-        pipeline = calculate_pipeline(lead, p_cfg, today)
+        # ⚠️ **VENDORED-ENGINE EDIT** — logged in UPSTREAM.md's edit table.
+        #
+        # A model-decided stage wins over the date ladder. `aeo/phases/ai_judgment.py`
+        # attaches `_ai_judgment` before this runs, having read each prospect's dated
+        # event TOGETHER WITH its type — which is the half `calculate_pipeline` cannot
+        # see. On a real run the ladder filed a `Commercial building permit` dated
+        # 2026-02-20 and a `Lease` from December 2019 under the same verdict.
+        #
+        # `calculate_pipeline` itself is untouched: it stays the fallback for a prospect
+        # the judge did not reach, so a failed model call degrades to today's behaviour
+        # rather than to nothing.
+        pipeline = _pipeline_from_judgment(p, p_cfg) or calculate_pipeline(
+            lead, p_cfg, today
+        )
         completeness = score_completeness(lead, c_cfg)
         # Authored factors take precedence over the legacy keyword table and occupy the
         # same axis (`fit.max`), so the 0-100 scale is unchanged.

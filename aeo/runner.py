@@ -77,6 +77,7 @@ from aeo.phases.query_expansion import (  # noqa: E402
     expand_queries,
     unexpanded_placeholders,
 )
+from aeo.phases.ai_judgment import judge_prospects
 from aeo.phases.validation import surviving_ids, validate_prospects  # noqa: E402
 from aeo.phases.zip_discovery import (  # noqa: E402
     DEFAULT_MAX_ZIPS_PER_MARKET,
@@ -380,6 +381,23 @@ def _optional_config_limit(
     """
     return _raw_positive_int(config, section, key)
 
+
+
+def _adjustment_bounds(tool_context: dict[str, Any]) -> tuple[float, float]:
+    """The `ai_adjustment` range the engine will honour, read from the same config.
+
+    Taken from the config rather than hardcoded so a judge cannot be handed a range
+    wider than the axis it feeds: the engine clamps to `ai_adjustment.min/max` when it
+    scores, so a model told +-40 would have its answer silently truncated and the
+    reasoning would then explain a number nobody stored.
+    """
+    cfg = ((tool_context.get("scoring") or {}).get("ai_adjustment")) or {}
+    try:
+        lo = float(cfg.get("min", -15))
+        hi = float(cfg.get("max", 15))
+    except (TypeError, ValueError):
+        lo, hi = -15.0, 15.0
+    return (min(lo, hi), max(lo, hi))
 
 def _top_ranked(
     prospects: list[dict[str, Any]], scored: list[dict[str, Any]], top_n: int
@@ -708,9 +726,62 @@ def main() -> int:
         # verification above (concurrency 2, one grounded call each), which on run
         # `cab8c68c` spent 81 minutes on 249 candidates and never reached this line.
         # These two lines make that distinction readable from the log alone.
+        # ── AI stage judgment ─────────────────────────────────────────────
+        # Before scoring, because the engine reads `_ai_judgment` and
+        # `ai_score_adjustment` off the prospect dict when it builds each scored item.
+        #
+        # Runs on the set that survived geography + validation: judging a prospect that
+        # was already rejected is a model call spent to reach a conclusion we hold.
+        #
+        # ⚠️ Unlike the other model phases this one is NOT gated on a config section.
+        # A stage is written for every prospect on every run, and a skill cannot opt out
+        # of having one — AEO's ruling is that a completed run always yields a stage. It
+        # IS gated on the vocabulary, which `build_tool_context` refuses to omit.
+        judgments: dict[str, dict[str, Any]] = {}
+        pipeline_vocab = tool_context.get("pipeline") or {}
+        if PHASE_SCORING in phases and pipeline_vocab.get("stages"):
+            _log(f"judging {len(prospects)} prospect(s) for pipeline stage")
+            judgments = judge_prospects(
+                prospects,
+                pipeline=pipeline_vocab,
+                product_description=tool_context.get("product_description") or "",
+                today=str(today),
+                provider=provider,
+                provider_config=provider_config,
+                parse_json_array=als.parse_json_array,
+                adjustment_bounds=_adjustment_bounds(tool_context),
+                emit=sink.emit,
+            )
+            for p in prospects:
+                judged = judgments.get(str(p.get("id")))
+                if not judged:
+                    continue
+                # Two channels, deliberately: `_ai_judgment` carries the stage the
+                # engine must prefer over its date ladder, and `ai_score_adjustment` is
+                # the field the engine ALREADY read and nothing ever supplied — which
+                # is why `ai_analysis` was NULL on all 131 rows of the last real run.
+                p["_ai_judgment"] = judged
+                p["ai_score_adjustment"] = judged.get("ai_score_adjustment", 0)
+            # Counted, not assumed: an unjudged prospect keeps the date ladder, so the
+            # split between judged and fallback has to be readable from the log or a
+            # degraded run looks like a healthy one.
+            _log(
+                f"judged {len(judgments)}/{len(prospects)} prospect(s); "
+                f"{len(prospects) - len(judgments)} fell back to the date ladder"
+            )
+
         _log(f"scoring {len(prospects)} prospect(s)")
         scored = als.score_prospects(prospects, tool_context, today=today)
         _log(f"scored {len(scored)} prospect(s)")
+
+        # The model's reasoning onto the scored item, so it reaches
+        # `prospects.ai_analysis` through `SCORED_PASSTHROUGH`. The engine puts the
+        # reasoning in `pipeline_detail` (which AEO has no column for); this is the
+        # field that actually lands.
+        for item in scored:
+            judged = judgments.get(str(item.get("prospect_id")))
+            if judged and judged.get("ai_analysis"):
+                item["ai_analysis"] = judged["ai_analysis"]
 
         # ── contacts ──────────────────────────────────────────────────────
         # After scoring, deliberately: contact search is the most expensive call
