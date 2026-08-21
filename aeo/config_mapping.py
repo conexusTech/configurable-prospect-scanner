@@ -96,6 +96,35 @@ def with_universal_fields(fields: Any) -> list[str]:
 # makes, so `discovery.entries_per_query` now overrides it (see `build_tool_context`).
 DEFAULT_PROVIDER = {
     "model": "gemini-3-flash-preview",
+    #: Model for the AI **judgment** phase only. A deliberate second tier, not an
+    #: oversight.
+    #:
+    #: 🔑 **Measured, not assumed.** Four real rows from run `9f9fe2d7` were judged by
+    #: both tiers. Three came out identically and correctly on each — a 2019 lease and a
+    #: 2011 "current occupant" were both recognised as TENURE rather than an event, and a
+    #: June-2026 lease signing became `5 - Decision Imminent` because the fit-out is
+    #: still ahead. They diverged on a mechanical/electrical permit dated 2026-02-20:
+    #:
+    #:   flash -> `5 - Decision Imminent`  "well into construction, approaching the
+    #:                                      finishing phase where flooring happens"
+    #:   pro   -> `6 - Likely Awarded`     "permit issued 6 months ago, so if flooring is
+    #:                                      involved the contractor was likely already
+    #:                                      selected"
+    #:
+    #: Pro is right, and the distinction is the whole ladder: these rungs measure when
+    #: the **decision** happens, not when the work happens. Flash reasoned about the work.
+    #:
+    #: ⚠️ Judgment only. Discovery is retrieval-with-grounding where flash is already
+    #: enough, and it issues grounded search queries — paying pro rates there buys
+    #: nothing. Judgment is the one phase whose output a human acts on directly.
+    #:
+    #: ⚠️ **Pinned, not `gemini-pro-latest`.** A floating alias would change the model
+    #: under a running pipeline with no deploy, so sales stages would shift silently —
+    #: the same reason production pins an image DIGEST rather than a tag. This IS a
+    #: preview id and so can move on Google's schedule; that is the accepted cost of the
+    #: better reasoning, and it is survivable because the judgement's reasoning is
+    #: persisted to `ai_analysis`, so a shift is explainable rather than invisible.
+    "judgment_model": "gemini-3.1-pro-preview",
     "temperature": 0.1,
     "entries_per_query": 3,
     "retry_attempts": 3,
