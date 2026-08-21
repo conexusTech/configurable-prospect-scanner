@@ -317,6 +317,15 @@ def judge_prospects(
             # Clamped, not rejected: a model returning 40 means "very good fit", and
             # honouring the sign while bounding the magnitude keeps that.
             adj = max(adj_min, min(adj_max, adj))
+            # Second, non-negotiable bound: the CONFIG itself is untrusted here.
+            # `adj_min`/`adj_max` come from `scoring.ai_adjustment`, authored per skill,
+            # so a skill written with `max: 1000` would clamp to 1000 — and AEO's
+            # `prospects.ai_score_adjustment` is NUMERIC(6,3), which overflows past
+            # 999.999 and 500s the callback for EVERY prospect of EVERY run. Verified
+            # against the live endpoint. Rounded to the column's scale for the same
+            # reason: a value with more than 3 decimals is silently re-rounded by
+            # Postgres, so do it here where it is visible.
+            adj = round(max(-999.999, min(999.999, adj)), 3)
 
             judged[pid] = {
                 "pipeline_status": stage,

@@ -1267,6 +1267,11 @@ def _pipeline_from_judgment(
 
     return {
         "pipeline_status": stage,
+        # Provenance travels WITH the stage. AEO re-derives a customer skill's stage
+        # unless it can see this marker, because the `calculate_pipeline` fallback it
+        # would otherwise be trusting is month-arithmetic that is wrong for event
+        # dates. `calculate_pipeline` returns no such key, so absent == derived.
+        "pipeline_source": "ai",
         "pipeline_detail": judged.get("ai_analysis") or "Stage judged by model.",
         "months_to_decision": None,
         "estimated_completion": "Unknown",
@@ -1434,8 +1439,17 @@ def score_prospects(
             "company_name": p.get("company_name") or lead.get("organization_name", ""),
             "city": lead.get("city", ""),
             "state": lead.get("state", ""),
-            "score": total,
+            # ⚠️ round(): `total` is a float whenever `ai_adj` is fractional, and the
+            # model may answer 3.5. AEO's `prospects.score` is an INTEGER column and
+            # its driver sends a JS float as TEXT, so 75.5 arrives as '75.5' and the
+            # whole callback 500s. Held for months only because `ai_score_adjustment`
+            # had no producer and 0 kept every total integral.
+            "score": round(total),
             "pipeline_status": pipeline["pipeline_status"],
+            # "ai" when the judgment phase decided this stage, "derived" when the
+            # engine's date arithmetic did. AEO keeps the former for any skill type
+            # and re-derives the latter for a customer skill.
+            "pipeline_source": pipeline.get("pipeline_source", "derived"),
             "pipeline_detail": pipeline["pipeline_detail"],
             "estimated_completion": pipeline["estimated_completion"],
             "estimated_decision": pipeline["estimated_decision"],

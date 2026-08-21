@@ -175,9 +175,21 @@ def map_scored_event(event: dict[str, Any]) -> list[dict[str, Any]]:
         # `discovery_data.by_source` on the `prospects` event, which IS persisted as
         # an open JSONB column — the scored copies are a flattened re-projection of
         # data AEO already stored.
+        # ⚠️ ONE exception to "nothing else", added 2026-08-21: `pipeline_source`.
+        # AEO cannot trust a bare stage from a customer skill, because the engine's
+        # `calculate_pipeline` fallback derives it from months-to-DECISION and that
+        # arithmetic is wrong for event dates — so AEO discarded it and re-derived,
+        # which silently threw away every LLM verdict (measured: '4 - Active Pursuit'
+        # persisted as '7 - Too Late'). This marker is what lets AEO tell a JUDGED
+        # stage from the date fallback and keep the former. Unlike the engine extras
+        # above it is not merely durable elsewhere — nothing else on the wire carries it.
         status = item.get(PIPELINE_STATUS_KEY)
         if isinstance(status, str) and status:
-            out["scoring_payload"] = {PIPELINE_STATUS_KEY: status}
+            payload = {PIPELINE_STATUS_KEY: status}
+            source = item.get("pipeline_source")
+            if isinstance(source, str) and source:
+                payload["pipeline_source"] = source
+            out["scoring_payload"] = payload
 
         # `prospect_id` is the only required field; an item without it cannot be
         # attached to anything, so it is dropped loudly rather than sent to 400.

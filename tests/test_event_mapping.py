@@ -113,6 +113,26 @@ class TestScoredMapping:
         assert PIPELINE_STATUS_KEY not in item
         assert item["scoring_payload"][PIPELINE_STATUS_KEY] == "in campaign"
 
+    def test_pipeline_source_rides_along_when_the_model_judged_the_stage(self):
+        # 🔑 The marker AEO needs to KEEP a stage instead of re-deriving it. Without it,
+        # AEO discards a customer skill's stage unconditionally and buckets months
+        # itself -- measured on run 222e758b, '4 - Active Pursuit' persisted as
+        # '7 - Too Late'. A bare stage cannot express "a model decided this".
+        out = map_scored_event(
+            {"type": "scored", "items": [_scored(pipeline_source="ai")]}
+        )
+        payload = out[0]["data"][0]["scoring_payload"]
+        assert payload["pipeline_source"] == "ai"
+        assert payload[PIPELINE_STATUS_KEY] == "in campaign"
+
+    def test_pipeline_source_is_ABSENT_when_the_date_ladder_chose_the_stage(self):
+        # The other half, and the reason this is a marker rather than a flag AEO can
+        # assume: the engine still falls back to `calculate_pipeline` for a prospect the
+        # judge did not reach, and that value must keep falling through to derivation.
+        # Absent == derived, so `calculate_pipeline` needed no new key.
+        out = map_scored_event({"type": "scored", "items": [_scored()]})
+        assert "pipeline_source" not in out[0]["data"][0]["scoring_payload"]
+
     def test_drops_an_item_with_no_prospect_id(self):
         # prospect_id is AEO's only required field; without it the item cannot be
         # attached to anything, so dropping beats a 400 that loses the batch. And
@@ -284,6 +304,12 @@ class TestWhitelistParity:
         # mapping it, which was wrong). The gateway reads
         # `scoring_payload.pipeline_status`, not a top-level field.
         "pipeline_status": "designed channel is scoring_payload, not top-level",
+        # Same channel as `pipeline_status`, and for the same reason -- it exists only
+        # to qualify that value. AEO has no column for it; it decides whether AEO KEEPS
+        # the stage (a model judgement) or re-derives it (the date-ladder fallback),
+        # then stores its own `prospects.pipeline_status_source`. Added 2026-08-22
+        # after AEO was measured discarding every verdict for a customer skill.
+        "pipeline_source": "designed channel is scoring_payload, not top-level",
         "_ai_judgment": "internal handoff between the phase and the engine",
         "stage_score": "internal: feeds the engine's axis, not a column",
     }
