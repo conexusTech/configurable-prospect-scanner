@@ -260,6 +260,80 @@ class TestUniversalRecordFields:
         prompt = self._prompt_for(None)
         assert "website" in prompt and "industry" in prompt
 
+    def _source_for(self, fields):
+        out = _with_geo_strict_prompt(
+            {"permits": {"name_field": "company_name", "fields": fields, "queries": ["q"]}},
+            "commercial flooring",
+        )
+        return out["permits"]
+
+    def test_the_appended_fields_reach_the_merge_vocabulary_not_only_the_prompt(self):
+        # 🔑 The regression that shipped `industry` NULL on every production run.
+        #
+        # Every test above this one asserts the PROMPT. None asserted `fields`, so none
+        # could see that the two had diverged: the model was asked for `industry`,
+        # answered with it, and `_merge_raw_rows` dropped it because
+        # `canonical_fields_from_sources` reads `fields` and `fields` never gained it.
+        #
+        # Asserting the prompt and the vocabulary together is the point — a fix that
+        # updates one and not the other is the original defect.
+        src = self._source_for(["company_name", "location"])
+        assert "industry" in src["fields"], "industry asked for but not in the vocabulary"
+        assert "website" in src["fields"], "website asked for but not in the vocabulary"
+        for key in src["fields"]:
+            assert key in src["prompt"], f"{key} is in the vocabulary but never asked for"
+
+    def test_the_vocabulary_survives_canonical_extraction(self):
+        # One hop further out, because `fields` being right is only useful if the
+        # engine's own extractor agrees. This is the function `_merge_raw_rows` gates on.
+        from av_lead_scanner import canonical_fields_from_sources
+
+        sources = _with_geo_strict_prompt(
+            {"permits": {"name_field": "company_name", "fields": ["company_name"], "queries": ["q"]}},
+            "commercial flooring",
+        )
+        canonical = canonical_fields_from_sources(sources)
+        assert "industry" in canonical
+        assert "website" in canonical
+
+    def test_industry_survives_the_merge_and_lands_on_the_record(self):
+        # End to end over the actual merge, with a row shaped like a model response.
+        # `industry` has no `_IDENTITY_ALIASES` entry, which is the whole reason it
+        # needed the vocabulary — `website` would have survived either way.
+        from av_lead_scanner import _merge_for_scoring, canonical_fields_from_sources
+
+        sources = _with_geo_strict_prompt(
+            {"permits": {"name_field": "company_name", "fields": ["company_name"], "queries": ["q"]}},
+            "commercial flooring",
+        )
+        canonical = list(canonical_fields_from_sources(sources))
+        merged = _merge_for_scoring(
+            [{"raw": {"company_name": "Acme Floors", "industry": "Flooring Contractor",
+                      "website": "acme.example"}}],
+            canonical,
+        )
+        assert merged.get("industry") == "Flooring Contractor"
+        # The record reads website through the folded alias, not the authored spelling.
+        assert merged.get("website_url") == "acme.example"
+
+    def test_the_authored_prompt_path_does_not_gain_an_unasked_vocabulary(self):
+        # The deliberate asymmetry. We never injected keys into an operator's own
+        # prompt, so claiming the fields would enlarge the `completeness` denominator
+        # (`filled / len(fields)`) with names that can never be filled — dragging every
+        # prospect's score down to record a field nobody asked for.
+        out = _with_geo_strict_prompt(
+            {
+                "custom": {
+                    "name_field": "company_name",
+                    "fields": ["company_name"],
+                    "queries": ["q"],
+                    "prompt": "my own prompt",
+                }
+            },
+            "x",
+        )
+        assert out["custom"]["fields"] == ["company_name"]
+
     def test_an_authored_prompt_is_left_alone(self):
         # A source that ships its own prompt is passed through untouched — we must not
         # rewrite an operator's literal prompt to inject keys.

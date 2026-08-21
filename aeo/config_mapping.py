@@ -403,6 +403,28 @@ def _with_geo_strict_prompt(
         )
         out[name] = {
             **source,
+            # ⚠️ Write the appended fields back into `fields` too, not just into the
+            # prompt. `fields` is the MERGE VOCABULARY: `canonical_fields_from_sources`
+            # reads it, and `_merge_raw_rows` keeps only those names plus
+            # `_IDENTITY_ALIASES`. Asking the model for a key we then omit from the
+            # vocabulary means the value arrives and is silently discarded.
+            #
+            # That is exactly what happened to `industry`, and the asymmetry is why it
+            # went unnoticed for so long: `website` survived regardless, because
+            # `_IDENTITY_ALIASES["website_url"]` folds the spelling `website` and the
+            # alias keys are appended to the vocabulary unconditionally. `industry` has
+            # no alias entry, so it had nothing to ride in on. Measured across every
+            # production run since the prompt started asking: website 0 -> 127/147,
+            # industry 0/N on every single run. One model returned both; one column got
+            # filled. Same defect shape as the locality write-back in `av_lead_scanner`
+            # — prompt and merge are two views of one fact, and only one was updated.
+            #
+            # The authored-prompt path above deliberately does NOT get this. There we
+            # never asked, so claiming the field would be a lie with a cost: an
+            # unfillable name in `canonical` enlarges the `completeness` denominator
+            # (`filled / len(fields)`) and drags every prospect's score down. The
+            # invariant is `fields` == what we actually asked for.
+            "fields": fields,
             "prompt": GEO_STRICT_PROMPT.replace(
                 "{product_description}", product_description or "(not specified)"
             ).replace("{keys}", ", ".join(str(f) for f in fields)),
