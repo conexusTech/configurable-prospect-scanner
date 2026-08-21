@@ -19,6 +19,28 @@ from aeo.config_mapping import (
 )
 
 
+#: The pipeline vocabulary AEO publishes on the runtime context. Minimal but real —
+#: two banded rungs and one resting rung, so a test can tell a timing decision from a
+#: fallback without carrying all seven.
+PIPELINE_CONTEXT = {
+    "stages": [
+        {"key": "1 - Early Discovery", "label": "Early Discovery", "order": 1,
+         "kind": "timing", "min_months": 18, "max_months": 999,
+         "requires_contact": False,
+         "description": "18+ months out. Build awareness early."},
+        {"key": "4 - Active Pursuit", "label": "Active Pursuit", "order": 2,
+         "kind": "timing", "min_months": 4, "max_months": 8,
+         "requires_contact": False,
+         "description": "4-8 months out. Active evaluation."},
+        {"key": "7 - Too Late", "label": "Too Late", "order": 3,
+         "kind": "timing", "min_months": -999, "max_months": -4,
+         "requires_contact": False,
+         "description": "Decided 4+ months ago. Move on unless something changed."},
+    ],
+    "signal_fields": ["trigger_date", "transaction_date"],
+}
+
+
 def _context(**config_overrides) -> dict:
     """A minimally complete, mappable AEO runtime context."""
     config = {
@@ -40,6 +62,7 @@ def _context(**config_overrides) -> dict:
         "organization": {"name": "Acme AV"},
         "geography": {"home_markets": {"TX": ["Austin", "Dallas"]}},
         "skill": {"config": config},
+        "pipeline": PIPELINE_CONTEXT,
     }
 
 
@@ -93,6 +116,7 @@ class TestMapping:
             "output",
             "sources",
             "scoring",
+            "pipeline",
         }
 
     def test_flattens_state_keyed_markets(self):
@@ -349,3 +373,58 @@ class TestUniversalRecordFields:
             "x",
         )
         assert out["custom"]["prompt"] == "my own prompt"
+
+class TestPipelineVocabulary:
+    """The vocabulary the AI judgment phase decides into. Refused, never defaulted."""
+
+    def test_carried_through_to_the_tool_context(self):
+        out = build_tool_context(_context())
+        assert [s["key"] for s in out["pipeline"]["stages"]] == [
+            "1 - Early Discovery",
+            "4 - Active Pursuit",
+            "7 - Too Late",
+        ]
+        assert out["pipeline"]["signal_fields"] == ["trigger_date", "transaction_date"]
+
+    def test_descriptions_survive_the_mapping(self):
+        # The judge reasons against these. Carrying keys without them would leave the
+        # model with only the month bounds — which IS the date-only mapping we are
+        # replacing.
+        out = build_tool_context(_context())
+        assert out["pipeline"]["stages"]
+        for s in out["pipeline"]["stages"]:
+            assert s["description"], f"{s['key']} lost its description"
+
+    def test_refuses_a_context_with_no_pipeline_block(self):
+        # An absent vocabulary means the gateway is older than this scanner. Failing
+        # loudly beats judging into rungs we invented — design rule 1 applied to the
+        # sales stage rather than to discovery.
+        ctx = _context()
+        del ctx["pipeline"]
+        with pytest.raises(UnmappedConfigError) as exc:
+            build_tool_context(ctx)
+        assert any("pipeline.stages" in p for p in exc.value.problems)
+
+    def test_refuses_an_empty_stage_list(self):
+        ctx = _context()
+        ctx["pipeline"] = {"stages": []}
+        with pytest.raises(UnmappedConfigError) as exc:
+            build_tool_context(ctx)
+        assert any("pipeline.stages" in p for p in exc.value.problems)
+
+    def test_refuses_a_rung_with_no_key(self):
+        # `key` is the exact value AEO validates on the callback, so a rung without
+        # one can never be persisted — better to say so than to emit it.
+        ctx = _context()
+        ctx["pipeline"] = {"stages": [{"label": "No key here"}]}
+        with pytest.raises(UnmappedConfigError) as exc:
+            build_tool_context(ctx)
+        assert any("no `key`" in p for p in exc.value.problems)
+
+    def test_names_the_vocabulary_fault_alongside_the_others(self):
+        # One pass of repairs, not one fault discovered per run — the same promise
+        # TestRefusal makes for the rest of the config.
+        with pytest.raises(UnmappedConfigError) as exc:
+            build_tool_context({"organization": {"name": "Acme"}, "skill": {"config": {}}})
+        assert any("pipeline.stages" in p for p in exc.value.problems)
+        assert len(exc.value.problems) >= 5

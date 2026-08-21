@@ -295,6 +295,29 @@ def build_tool_context(
             "shortlist."
         )
 
+    # The pipeline-stage vocabulary AEO publishes on the runtime context. Refused
+    # rather than defaulted, for the same reason as `scoring`: the AI judgment phase
+    # decides a SALES stage from it, and rungs we invented here would put prospects in
+    # columns nobody defined. AEO ships this for every scraping org — a declared
+    # `config.pipeline.stages[]` or the shared ladder — so an absence means the gateway
+    # is older than this scanner, which is worth failing loudly on.
+    pipeline = context.get("pipeline") or {}
+    stages = pipeline.get("stages") if isinstance(pipeline, dict) else None
+    if not isinstance(stages, list) or not stages:
+        problems.append(
+            "`pipeline.stages` is missing from the runtime context. The scoring "
+            "phase judges each prospect into these rungs, so without them there is "
+            "no vocabulary to decide between — and inventing one would file "
+            "prospects under stages nobody defined. Upgrade the gateway, or check "
+            "that GET /runtime/organizations/{id}/context returns a `pipeline` block."
+        )
+    elif not all(isinstance(s, dict) and s.get("key") for s in stages):
+        problems.append(
+            "`pipeline.stages` contains an entry with no `key`. The key is the exact "
+            "value AEO validates on the callback, so a rung without one can never be "
+            "persisted."
+        )
+
     if problems:
         raise UnmappedConfigError(problems)
 
@@ -327,6 +350,20 @@ def build_tool_context(
             product_description,
         ),
         "scoring": scoring,
+        # The pipeline-stage vocabulary the AI judgment phase decides INTO, straight
+        # from AEO's runtime context (`context["pipeline"]`).
+        #
+        # 🔑 **A 7th top-level key, and the first addition since this mapping was
+        # written.** The engine does not read it — `aeo/phases/ai_judgment.py` does. It
+        # is carried here rather than passed separately because `build_tool_context` is
+        # the one place that turns an AEO context into something the phases consume, and
+        # a second channel would be a second thing to forget.
+        #
+        # ⚠️ NOT defaulted. A missing vocabulary is refused above, next to the other
+        # `UnmappedConfigError` faults, because the alternative is judging into rungs we
+        # invented — which is design rule 1 ("a default here is a wrong answer wearing a
+        # confident face") applied to the sales stage instead of to discovery.
+        "pipeline": pipeline,
     }
 
 
