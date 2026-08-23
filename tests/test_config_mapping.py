@@ -265,7 +265,30 @@ class TestUniversalRecordFields:
     def test_preserves_the_authored_fields_and_their_order(self):
         got = with_universal_fields(["company_name", "signal_type", "location"])
         assert got[:3] == ["company_name", "signal_type", "location"]
-        assert got[3:] == ["website", "industry"]
+        assert got[3:] == ["website", "industry", "event_date", "event_type"]
+
+    def test_asks_every_vertical_for_a_dated_event(self):
+        # A stage is a judgement about TIMING, and AEO's ruling is that every completed
+        # run yields one — so a skill that asks for no date cannot be staged by anything,
+        # however good the judge is. `commercial-hvac-mechanical-services` asked for none
+        # across four sources: 0 date-shaped fields on 497 production prospects, and all
+        # 37 judged rows of its last run correctly placed at the entry rung on nothing.
+        prompt = self._prompt_for(["company_name", "permit_status"])
+        assert "event_date" in prompt and "event_type" in prompt
+        # 🔑 The model chooses WHICH event matters for its industry — we never enumerate
+        # `permit_date` vs `bid_due_date`, because that list is the per-vertical table
+        # the scanner is required not to have.
+        #
+        # Whitespace-normalised: the instruction wraps, and a reflow of the prompt is
+        # not a behaviour change. Asserting the raw string would fail on a line break.
+        flat = " ".join(prompt.split())
+        assert "single most decisive dated event" in flat
+        assert "YOU decide what that is for this kind of record and this industry" in flat
+
+    def test_a_skill_that_authored_its_own_event_field_keeps_it(self):
+        got = with_universal_fields(["company_name", "trigger_date", "trigger_type"])
+        assert got[:3] == ["company_name", "trigger_date", "trigger_type"]
+        assert "event_date" in got, "appending never substitutes an authored field"
 
     def test_does_not_duplicate_an_alias_the_engine_already_folds(self):
         # `website_url` / `url` / `domain` all resolve to website_url upstream, so asking

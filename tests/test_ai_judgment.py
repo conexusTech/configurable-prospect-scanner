@@ -50,11 +50,22 @@ PIPELINE = {
 
 
 def prospect(pid: str, **by_source):
-    """A prospect in the shape the discovery phase leaves behind."""
+    """A prospect in the shape the discovery phase leaves behind.
+
+    ⚠️ This claim was **false for four months** and cost two production runs. The key
+    was `_by_source`, which `av_lead_scanner.build_prospects` has never written — it
+    writes `discovery_data.by_source`. Every assertion in this file therefore passed
+    against a shape that does not exist, while the judge in production read an empty
+    dict and placed all 84 prospects at the entry rung.
+
+    A hand-written fixture cannot testify about a producer it never calls, no matter
+    what its docstring claims. `TestReadsTheRealProducerShape` below closes that by
+    going through `build_prospects` itself.
+    """
     return {
         "id": pid,
         "company_name": f"Company {pid}",
-        "_by_source": by_source or {},
+        "discovery_data": {"by_source": by_source or {}},
     }
 
 
@@ -400,3 +411,139 @@ class TestEnginePrefersTheJudgement:
         # supplied — which is why ai_analysis was NULL on all 131 rows of the last run.
         item = self._score({"id": "p1", "ai_score_adjustment": -10})
         assert item["ai_score_adjustment"] == -10
+
+
+class TestReadsTheRealProducerShape:
+    """The gap that made every other test in this file vacuous.
+
+    `ai_judgment` read `prospect["_by_source"]`. `av_lead_scanner._assemble_prospects`
+    writes `discovery_data.by_source`. Nothing wrote `_by_source` — not the producer,
+    not the runner, not the engine — so the judge's event loop iterated an empty dict on
+    every prospect of every production run, and the prompt fell through to
+    "event: none found". The model then did exactly as instructed with no signal and
+    placed all 84 judged prospects of 2026-08-21 at the entry rung.
+
+    Every assertion above passed throughout, because the fixture invented the same wrong
+    key. So these tests go through the PRODUCER: if the two shapes ever diverge again,
+    the failure lands here rather than in production.
+    """
+
+    @staticmethod
+    def _produced(raw: dict, source: str = "in_market_triggers"):
+        import av_lead_scanner as als
+
+        groups = {
+            als.normalize_name(raw["company_name"]): [
+                {"raw": raw, "source": source, "name_field": "company_name"}
+            ]
+        }
+        return als._assemble_prospects(
+            groups=groups, scan_run_id="r1", canonical=tuple(raw)
+        )[0]
+
+    def test_reads_the_shape_the_producer_actually_writes(self):
+        p = self._produced(
+            {
+                "company_name": "Highwoods Properties",
+                "trigger_type": "Commercial Building Permit",
+                "trigger_date": "2026-08-20",
+            }
+        )
+        prov = responder(
+            [{"id": p["id"], "stage": "4 - Active Pursuit", "reasoning": "r", "adjustment": 0}]
+        )
+        run([p], prov)
+        line = next(l for l in prov.seen["prompt"].split("\n") if l.startswith("event:"))
+        assert "Commercial Building Permit" in line
+        assert "2026-08-20" in line
+
+    def test_the_producer_does_not_write_the_key_this_module_used_to_read(self):
+        # Stated as its own assertion so the reason the above works is not a coincidence
+        # anybody can silently undo.
+        p = self._produced({"company_name": "Acme", "trigger_date": "2026-01-01"})
+        assert "_by_source" not in p
+        assert "by_source" in p["discovery_data"]
+
+    def test_the_hand_written_fixture_matches_the_producer(self):
+        # Keeps `prospect()` honest about the claim in its docstring.
+        produced = self._produced({"company_name": "Acme", "trigger_date": "2026-01-01"})
+        fixture = prospect("p1", s={"trigger_date": "2026-01-01"})
+        assert set(fixture["discovery_data"]) <= set(produced["discovery_data"])
+        assert "by_source" in fixture["discovery_data"]
+
+
+class TestSignalFieldsAreNotKeyedToOneVertical:
+    """`signal_fields` used to default to `["trigger_date", "transaction_date"]`.
+
+    Those are the field names of ONE skill (`commercial-flooring`). Measured on the
+    production copy: that pair matched 220 of 389 of its own prospects, **0 of 15 for a
+    second org that had 8 date-shaped fields**, and 0 of 497 for a third whose sources
+    ask for no date at all. The resolution is now by SHAPE, via the engine's own
+    `timing_fields_from_authored`, so a vertical authored next year works unedited.
+    """
+
+    @staticmethod
+    def _resolve(rows: list[dict], declared=None):
+        from aeo.runner import _resolve_signal_fields
+
+        prospects = [
+            {"id": f"p{i}", "discovery_data": {"by_source": {"s": row}}}
+            for i, row in enumerate(rows)
+        ]
+        return _resolve_signal_fields({"signal_fields": declared or []}, prospects)
+
+    def test_finds_a_date_field_no_skill_declared(self):
+        assert "permit_date" in self._resolve([{"permit_date": "2026-02-20"}])
+
+    def test_finds_the_universal_pair_this_change_appends(self):
+        assert "event_date" in self._resolve([{"event_date": "2026-02-20"}])
+
+    def test_finds_a_timeline_that_is_not_spelled_date(self):
+        assert "estimated_timeline" in self._resolve([{"estimated_timeline": "Q2 2027"}])
+
+    def test_an_operators_declaration_always_survives(self):
+        # Even one the shape vocabulary would never match on its own.
+        out = self._resolve([{"closing": "2026-05-01"}], declared=["closing"])
+        assert "closing" in out
+
+    def test_ignores_a_field_that_is_not_timing_shaped(self):
+        assert self._resolve([{"square_footage": "120,000"}]) == []
+
+    def test_the_old_hardcoded_pair_is_gone(self):
+        # It must no longer appear from nowhere: a run whose data contains neither name
+        # resolves to neither name.
+        assert self._resolve([{"square_footage": "1"}]) == []
+
+
+class TestShapeMatchedFieldsMustLookLikeDates:
+    """`signal_fields` is resolved by NAME shape, and this phase does not parse.
+
+    The engine can match on shape safely because `timing_fields_from_authored` feeds a
+    parser — a non-date simply fails to parse and costs nothing. Here the value goes
+    straight into a prompt as `dated <value>`, so a field matched on its name alone can
+    put prose in front of the model as timing evidence. `candidate_name` is the concrete
+    case: it normalises to `candidatename`, which contains "date".
+    """
+
+    def _lines(self, row, fields):
+        from aeo.phases.ai_judgment import _prospect_lines
+
+        return _prospect_lines([prospect("p1", s=row)], fields)
+
+    def test_a_name_matched_field_holding_prose_is_not_offered_as_an_event(self):
+        out = self._lines({"candidate_name": "Bob Smith"}, ["candidate_name"])
+        assert "dated Bob Smith" not in out
+        assert "event: none found" in out
+
+    def test_a_bare_year_still_counts(self):
+        assert "dated 2019" in self._lines({"trigger_date": "2019"}, ["trigger_date"])
+
+    def test_a_quarter_still_counts(self):
+        assert "dated Q2 2027" in self._lines(
+            {"estimated_timeline": "Q2 2027"}, ["estimated_timeline"]
+        )
+
+    def test_a_month_and_year_still_counts(self):
+        assert "dated March 2026" in self._lines(
+            {"event_date": "March 2026"}, ["event_date"]
+        )

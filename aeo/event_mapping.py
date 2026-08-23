@@ -63,6 +63,11 @@ SCORED_PASSTHROUGH = (
     # model reasoning is computed, paid for, and dropped one line before the wire.
     "ai_analysis",
     "ai_score_adjustment",
+    # Added 2026-08-23. The FOURTH omission from this tuple would have been the event
+    # the stage rests on: computed by the judge, named on `ScanScoredItemDto`, and
+    # dropped one line before the wire. Listed with its parity test rather than trusted.
+    "signal_event",
+    "signal_date",
 )
 
 # Fields on the engine's `prospects` item that map straight onto AEO columns.

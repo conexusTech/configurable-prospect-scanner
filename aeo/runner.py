@@ -51,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import av_lead_scanner as als  # noqa: E402
 
 from aeo.config_mapping import (  # noqa: E402
+    UNIVERSAL_TIMING_FIELDS,
     UnmappedConfigError,
     build_tool_context,
     unsupported_authored_sections,
@@ -399,6 +400,81 @@ def _adjustment_bounds(tool_context: dict[str, Any]) -> tuple[float, float]:
         lo, hi = -15.0, 15.0
     return (min(lo, hi), max(lo, hi))
 
+
+def _pin_completeness_fields(tool_context: dict[str, Any]) -> None:
+    """Keep the universal timing pair out of the completeness denominator.
+
+    `fields` does double duty: it is the merge vocabulary AND, when a skill declares no
+    `scoring.completeness.fields`, the engine derives the denominator from it
+    (`filled / len(fields)`). Appending `event_date`/`event_type` to every source would
+    therefore dock every prospect discovered from a source that legitimately has no
+    dated event — a property directory, a firm register — for a field we added on their
+    behalf and they were right to leave blank.
+
+    Set explicitly rather than by editing the engine: `score_prospects` derives the list
+    only when the context does not carry one, so writing it here wins without touching
+    the vendored file. A skill that authored its own `completeness.fields` is untouched.
+
+    ⚠️ The pair stays in `sources[*].fields` — that is the merge vocabulary, and dropping
+    it there is precisely the `industry` defect of `acafb67`: a key asked for and then
+    omitted from the vocabulary arrives and is silently discarded.
+    """
+    scoring = tool_context.setdefault("scoring", {})
+    completeness = scoring.setdefault("completeness", {})
+    if completeness.get("fields"):
+        return
+    canonical = list(als.canonical_fields_from_sources(tool_context.get("sources")))
+    scored = [f for f in canonical if f not in UNIVERSAL_TIMING_FIELDS]
+    # `or canonical` guards the degenerate case of a source whose ONLY fields are the
+    # pair we appended: an empty denominator scores 0 for everyone, silently.
+    completeness["fields"] = scored or canonical
+
+
+def _resolve_signal_fields(
+    pipeline_vocab: dict[str, Any], prospects: list[dict[str, Any]]
+) -> list[str]:
+    """Which keys on a discovered row carry a dated event, for THIS run's data.
+
+    Union of two sources, in this order:
+
+    1. Whatever the skill declared (`pipeline.signal_fields`). An operator's explicit
+       naming always survives.
+    2. Every key actually present on the run's `discovery_data.by_source` rows whose
+       *shape* reads as timing — resolved by `als.timing_fields_from_authored`, the
+       engine's own `_TIMING_NAME_HINTS` vocabulary (`timeline|date|completion|due|
+       schedule|when`). Deliberately the engine's function and not a second copy: the
+       date ladder already answers "which field is a date" this way, and two readers of
+       one concept is precisely the drift this phase was built to remove.
+
+    🔑 **Nothing here names a vertical, an org or a place.** `permit_date`,
+    `bid_due_date`, `trigger_date` and `estimated_timeline` all resolve on their shape,
+    so a skill authored next year works without an edit. The list this replaces was the
+    literal pair `["trigger_date", "transaction_date"]` — one skill's field names, which
+    scored 0/15 on a second org that had 8 usable dates and 0/497 on a third.
+
+    A false positive costs nothing: the value is handed to a model as text beside its
+    event type, and a non-date simply reads as one more attribute. A false NEGATIVE is
+    also survivable — the free-text loop prints every string field regardless — so this
+    resolution controls labelling, not visibility.
+    """
+    declared = [str(f) for f in (pipeline_vocab.get("signal_fields") or []) if str(f)]
+    present: list[str] = []
+    for p in prospects:
+        discovery = p.get("discovery_data")
+        by_source = discovery.get("by_source") if isinstance(discovery, dict) else None
+        for row in (by_source or {}).values():
+            if not isinstance(row, dict):
+                continue
+            for key in row:
+                if key not in present:
+                    present.append(str(key))
+    out = list(declared)
+    for name in als.timing_fields_from_authored(present):
+        if name not in out:
+            out.append(name)
+    return out
+
+
 def _top_ranked(
     prospects: list[dict[str, Any]], scored: list[dict[str, Any]], top_n: int
 ) -> list[dict[str, Any]]:
@@ -499,6 +575,8 @@ def main() -> int:
         sink.emit_safe({"type": "error", "message": str(exc)})
         _log(str(exc))
         return 1
+
+    _pin_completeness_fields(tool_context)
 
     # The engine's own deterministic check, kept as a second gate: ours validates
     # that AEO's config maps, this validates that the mapping produced something
@@ -740,7 +818,11 @@ def main() -> int:
         judgments: dict[str, dict[str, Any]] = {}
         pipeline_vocab = tool_context.get("pipeline") or {}
         if PHASE_SCORING in phases and pipeline_vocab.get("stages"):
-            _log(f"judging {len(prospects)} prospect(s) for pipeline stage")
+            signal_fields = _resolve_signal_fields(pipeline_vocab, prospects)
+            _log(
+                f"judging {len(prospects)} prospect(s) for pipeline stage; "
+                f"timing signal fields: {', '.join(signal_fields) or '(none found)'}"
+            )
             judgments = judge_prospects(
                 prospects,
                 pipeline=pipeline_vocab,
@@ -750,6 +832,7 @@ def main() -> int:
                 provider_config=provider_config,
                 parse_json_array=als.parse_json_array,
                 adjustment_bounds=_adjustment_bounds(tool_context),
+                signal_fields=signal_fields,
                 emit=sink.emit,
             )
             for p in prospects:
@@ -780,8 +863,16 @@ def main() -> int:
         # field that actually lands.
         for item in scored:
             judged = judgments.get(str(item.get("prospect_id")))
-            if judged and judged.get("ai_analysis"):
+            if not judged:
+                continue
+            if judged.get("ai_analysis"):
                 item["ai_analysis"] = judged["ai_analysis"]
+            # The evidence beside the verdict. Copied here for the same reason as the
+            # reasoning: the engine's scored item is built by the vendored file, which
+            # knows nothing about this phase, so the judgment is grafted on after.
+            for field in ("signal_event", "signal_date"):
+                if judged.get(field):
+                    item[field] = judged[field]
 
         # ── contacts ──────────────────────────────────────────────────────
         # After scoring, deliberately: contact search is the most expensive call

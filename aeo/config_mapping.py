@@ -56,7 +56,31 @@ SOURCE_REQUIRED_KEYS = ("name_field", "fields", "queries")
 #: confident face". This changes only what is captured about a record already discovered,
 #: and it mirrors what the engine does for city / state / zip_code / contact_title
 #: regardless of what a skill authored.
-UNIVERSAL_RECORD_FIELDS = ("website", "industry")
+#: `event_date`/`event_type` joined them 2026-08-23, for the same reason one layer up.
+#: Every completed run yields a pipeline stage — that is AEO's ruling, not a vertical's
+#: preference — and a stage is a judgement about TIMING. So a skill that asks for no date
+#: cannot be staged by anything, however good the judge is. Measured across the whole
+#: production copy: `commercial-hvac-mechanical-services` collected **0 date-shaped fields
+#: on 497 prospects** (its four sources ask for `permit_status`, `bid_title`, `scope`,
+#: `firm_type` and no date at all), so all 37 judged rows on its last run were placed at
+#: the entry rung — correctly, on the nothing they carried.
+#:
+#: 🔑 **The model decides WHICH event matters, not us.** The prompt asks for "the single
+#: most decisive dated event" and lets the model name it in `event_type`; nothing here
+#: enumerates `permit_date` vs `bid_due_date` vs `closing_date`, because that list is a
+#: vertical judgement and would need re-authoring per industry — the exact shape the
+#: scanner is required not to have. A skill that already asks for its own dated field
+#: keeps it: `with_universal_fields` appends, never substitutes, and
+#: `_resolve_signal_fields` unions both.
+UNIVERSAL_RECORD_FIELDS = ("website", "industry", "event_date", "event_type")
+
+#: The universal pair above, excluded from the COMPLETENESS denominator by
+#: `aeo/runner.py`. `fields` does double duty — merge vocabulary and
+#: `filled / len(fields)` — so appending two keys to every source would quietly dock
+#: every prospect discovered from a source that legitimately has no event (a property
+#: directory listing, a firm register). Capturing a signal must not penalise the records
+#: that honestly lack it.
+UNIVERSAL_TIMING_FIELDS = ("event_date", "event_type")
 
 #: Spellings the engine already folds into `website_url` (`_IDENTITY_ALIASES`). If a skill
 #: authored any of them, asking again as `website` would duplicate the key in the prompt.
@@ -164,6 +188,16 @@ when the area genuinely has none.
 
 For each result gather the fields listed below. Be accurate; leave a field blank
 rather than guessing.
+
+**`event_date` and `event_type` — the timing signal.** Report the single most
+decisive dated event you can find for this organization: the one a salesperson would
+act on. YOU decide what that is for this kind of record and this industry — a permit
+issued, a lease signed, a facility acquired, a contract awarded, a bid closing, a
+funding round, a site announced. Put the date in `event_date` (as precisely as the
+source gives it — "2026-03-14", "March 2026" and "2019" are all acceptable) and name
+the event in `event_type` in your own words. Leave BOTH blank if the record genuinely
+has no dated event; a tenure fact ("occupant since 2011") is not an event, and a
+guessed date is worse than none.
 {seed_context}
 Return AT MOST {n} results as a JSON array. Each object must have these keys:
 {keys}

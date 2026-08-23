@@ -48,7 +48,7 @@ Design choices, none forced by the contract:
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from aeo.phases._concurrent import (
     DEFAULT_CALL_TIMEOUT_S,
@@ -64,6 +64,12 @@ JUDGMENT_FIELDS = (
     "stage_score",
     "ai_analysis",
     "ai_score_adjustment",
+    # The evidence, separated from the prose. `ai_analysis` already explains the stage,
+    # but a sentence cannot be rendered as a chip beside it, and a prospect discovered
+    # from five sources may carry five dated events — so "which one decided this" is not
+    # recoverable from the record without the judge naming it.
+    "signal_event",
+    "signal_date",
 )
 
 #: Prospects per model call. **1 by ruling, not by accident.**
@@ -120,7 +126,11 @@ THE PROSPECTS
 Return ONLY a JSON array, one object per prospect, no other text:
 [{{"id": "<the id given>", "stage": "<exact stage key from the list>", \
 "reasoning": "<one or two sentences: which event, what it implies, why this stage>", \
-"adjustment": <number>}}]
+"adjustment": <number>, \
+"event": "<the ONE event you based the stage on, in plain words a salesperson would \
+read — 'Started leasing', 'Building permit issued', 'Acquired the property'. Empty \
+string if there was no dated event>", \
+"event_date": "<that event's date exactly as it was given to you, or empty string>"}}]
 
 Use the stage KEY exactly as written. If you cannot judge a prospect, still return it \
 with the first stage listed and say why in the reasoning."""
@@ -151,6 +161,34 @@ def _stage_lines(stages: list[dict[str, Any]]) -> str:
     return "\n".join(out)
 
 
+def _by_source(prospect: dict[str, Any]) -> dict[str, Any]:
+    """The per-source rows a prospect was discovered from.
+
+    ⚠️ This read used to be `prospect["_by_source"]` — **a key nothing in the scanner has
+    ever written.** The producer is `av_lead_scanner.build_prospects`, which writes
+    `discovery_data.by_source`, and every other consumer reads it there
+    (`aeo/phases/validation.py`, the engine's `_scoring_input`, AEO's own
+    `collectSignals`). This module was the sole outlier, so the loop below iterated an
+    empty dict for every prospect on every run, the block fell through to
+    "event: none found", and the model faithfully placed every prospect at the entry
+    rung — doing exactly what it was told with the nothing it was given.
+
+    Measured on the two production runs of 2026-08-21: **84 judged, 84 at the entry
+    rung**, `ai_score_adjustment` 0 on 83 of them, while 38 carried a dated event in
+    `by_source` that the judge was never shown — one of them a commercial building
+    permit dated the day before the run.
+
+    The suite could not see it: `tests/test_ai_judgment.py` built its fixture with
+    `_by_source`, under a docstring claiming it was "the shape the discovery phase
+    leaves behind". A fixture is not evidence about a producer it never calls — hence
+    `test_reads_the_shape_the_producer_actually_writes`, which goes through
+    `build_prospects` instead of asserting a shape by hand.
+    """
+    discovery = prospect.get("discovery_data")
+    by_source = discovery.get("by_source") if isinstance(discovery, dict) else None
+    return by_source if isinstance(by_source, dict) else {}
+
+
 def _prospect_lines(
     prospects: list[dict[str, Any]], signal_fields: list[str]
 ) -> str:
@@ -169,12 +207,27 @@ def _prospect_lines(
                 lines.append(f"{field}: {p[field]}")
 
         seen: set[str] = set()
-        for src_name, row in (p.get("_by_source") or {}).items():
+        for src_name, row in _by_source(p).items():
             if not isinstance(row, dict):
                 continue
             for date_field in signal_fields:
                 date_val = row.get(date_field)
                 if not (isinstance(date_val, str) and date_val.strip()):
+                    continue
+                # ⚠️ Must contain a digit. `signal_fields` is resolved by NAME shape
+                # (`timeline|date|completion|due|schedule|when`), and the engine can
+                # afford that because it *parses* every candidate before use — "a false
+                # positive costs nothing", per `timing_fields_from_authored`. This phase
+                # does not parse: it hands the raw string to a model. So a field the
+                # shape rule matches on its name but that holds prose would print as
+                # `event: … dated <prose>` and be reasoned about as timing.
+                #
+                # `candidate_name` is the concrete case — it normalises to
+                # `candidatename`, which contains "date". Zero occurrences across all
+                # 446 date-shaped fields in the production copy today, so this is a
+                # latent guard, not a fix. A digit admits "2019", "Q2 2027" and
+                # "March 2026" while rejecting a name.
+                if not any(ch.isdigit() for ch in date_val):
                     continue
                 prefix = date_field.rsplit("_", 1)[0]
                 type_val = row.get(f"{prefix}_type") or ""
@@ -218,12 +271,19 @@ def judge_prospects(
     parse_json_array: Callable[[str], list[dict[str, Any]]],
     adjustment_bounds: tuple[float, float] = (-15.0, 15.0),
     batch_size: int = DEFAULT_BATCH_SIZE,
+    signal_fields: Sequence[str] | None = None,
     emit: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Judge each prospect's stage and fit. Returns `{prospect_id: {...JUDGMENT_FIELDS}}`.
 
     A prospect the model did not judge is **absent from the result**, not present with a
     guess — the caller decides the fallback and records that it was one.
+
+    `signal_fields` names which keys carry a dated event, and the caller resolves it —
+    `aeo/runner.py` unions the skill's declaration with `timing_fields_from_authored`,
+    the engine's vocabulary of *shapes*. It is a parameter rather than a constant here
+    because the resolution needs the engine, and this module is deliberately reachable
+    without it.
     """
     stages = [s for s in (pipeline.get("stages") or []) if isinstance(s, dict) and s.get("key")]
     if not stages or not prospects:
@@ -237,9 +297,19 @@ def judge_prospects(
         str(s["key"]): s.get("score") for s in stages if s.get("score") is not None
     }
     entry_key = str(stages[0]["key"])
-    signal_fields = [
-        str(f) for f in (pipeline.get("signal_fields") or ["trigger_date", "transaction_date"])
-    ]
+    # ⚠️ **No industry default here, and never again a literal pair.** This used to fall
+    # back to `["trigger_date", "transaction_date"]` — which are the field names of ONE
+    # skill (`commercial-flooring`), so the judge was keyed to a single vertical's
+    # authoring. Measured across the whole prod copy: of three orgs with prospects, that
+    # pair matched 220/389 rows for `commercial-flooring`, **0/15 for Arthur Elliott
+    # despite 8 of them carrying a date-shaped field**, and 0/497 for
+    # `commercial-hvac-mechanical-services`, whose sources ask for no date at all.
+    #
+    # Resolution now belongs to the caller (see the docstring). An empty list is a legal
+    # answer and costs less than it looks: every string field on a source row already
+    # reaches the prompt through the free-text loop below, so an unresolved date still
+    # arrives — it just arrives unlabelled, without its event type paired to it.
+    resolved_signal_fields = [str(f) for f in (signal_fields or pipeline.get("signal_fields") or [])]
     adj_min, adj_max = adjustment_bounds
     stage_block = _stage_lines(stages)
 
@@ -263,7 +333,7 @@ def judge_prospects(
             stages=stage_block,
             adj_min=adj_min,
             adj_max=adj_max,
-            prospects=_prospect_lines(batch, signal_fields),
+            prospects=_prospect_lines(batch, resolved_signal_fields),
         )
         raw = provider(
             prompt,
@@ -332,7 +402,20 @@ def judge_prospects(
                 "stage_score": stage_scores.get(stage),
                 "ai_analysis": reasoning or None,
                 "ai_score_adjustment": adj,
+                # WHICH event the stage rests on, named in the model's own words
+                # ("Started leasing", "Building permit issued"). A prospect commonly
+                # carries several dated events from several sources, so "the event" is
+                # ambiguous without the judge saying which one it used — and a stage
+                # whose evidence a salesperson cannot see is a label, not an argument.
+                #
+                # Capped rather than validated: this is free text for display, and a
+                # long one would be a model returning a paragraph into a chip.
+                "signal_event": (str(item.get("event") or "").strip() or None),
+                "signal_date": (str(item.get("event_date") or "").strip() or None),
             }
+            for k in ("signal_event", "signal_date"):
+                if judged[pid][k] and len(judged[pid][k]) > 200:
+                    judged[pid][k] = judged[pid][k][:200]
 
     if emit:
         emit(

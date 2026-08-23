@@ -203,3 +203,56 @@ class TestCollectedFieldsReachTheirColumns:
         item = payloads[0]["data"][0]
         assert item["contact_title"] == "President"
         assert item["sources"] == "business_directories"
+
+
+class TestUniversalTimingFieldsDoNotDockCompleteness:
+    """`fields` does double duty, and the second job punishes the first.
+
+    It is the merge vocabulary AND the completeness denominator
+    (`filled / len(fields)`). Appending `event_date`/`event_type` to every source — so
+    that every vertical is asked for a timing signal — would therefore dock every
+    prospect discovered from a source that legitimately has no dated event: a property
+    directory, a firm register. Penalising a record for honestly lacking a field we
+    added on its behalf is the opposite of what the append is for.
+
+    The pair must nevertheless STAY in `sources[*].fields`: that is the merge
+    vocabulary, and dropping it there is exactly the `industry` defect of `acafb67` —
+    asked for, answered, then silently discarded.
+    """
+
+    SOURCES = {
+        "permits": {"fields": ["company_name", "permit_status", "event_date", "event_type"]},
+        "directories": {"fields": ["company_name", "portfolio_size", "event_date", "event_type"]},
+    }
+
+    def _pinned(self, scoring=None):
+        from aeo.runner import _pin_completeness_fields
+
+        ctx = {"sources": self.SOURCES, "scoring": scoring if scoring is not None else {}}
+        _pin_completeness_fields(ctx)
+        return ctx
+
+    def test_the_timing_pair_is_out_of_the_denominator(self):
+        fields = self._pinned()["scoring"]["completeness"]["fields"]
+        assert "event_date" not in fields and "event_type" not in fields
+        assert "permit_status" in fields and "portfolio_size" in fields
+
+    def test_the_pair_stays_in_the_merge_vocabulary(self):
+        # The half that must NOT be dropped. `canonical_fields_from_sources` reads
+        # `sources[*].fields`, and `_merge_raw_rows` keeps only what it names.
+        self._pinned()
+        assert "event_date" in als.canonical_fields_from_sources(self.SOURCES)
+
+    def test_a_skill_that_declared_its_own_completeness_fields_is_untouched(self):
+        authored = {"completeness": {"fields": ["company_name", "event_date"]}}
+        got = self._pinned(authored)["scoring"]["completeness"]["fields"]
+        assert got == ["company_name", "event_date"], "an operator's declaration wins"
+
+    def test_a_source_of_nothing_but_the_pair_does_not_score_everyone_zero(self):
+        from aeo.runner import _pin_completeness_fields
+
+        ctx = {"sources": {"s": {"fields": ["event_date", "event_type"]}}, "scoring": {}}
+        _pin_completeness_fields(ctx)
+        # An empty denominator makes `score_completeness` return 0 for every prospect,
+        # silently and forever. Falling back to the full list is wrong-but-visible.
+        assert ctx["scoring"]["completeness"]["fields"]
