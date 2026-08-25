@@ -178,13 +178,29 @@ class TestThroughScoreProspects:
     def _score(self, prospect):
         return als.score_prospects([prospect], {"scoring": self.SCORING}, today=TODAY)[0]
 
-    def test_a_disqualified_prospect_is_zeroed_and_banded_skip_with_a_reason(self):
+    def test_a_disqualified_prospect_KEEPS_its_score_and_its_real_band(self):
+        """A disqualifier states ELIGIBILITY, not rank -- so it must not rewrite the score.
+
+        This asserted `score == 0` until 2026-08-26. On a real run that flattened 21 of 29
+        scored prospects to zero when their true scores were 14-61, and the best prospect
+        that SURVIVED scored 52 -- so six excluded prospects had outscored every survivor
+        and all of them rendered as worthless. That reads as a broken scorer, and it was
+        reported as one.
+
+        The zero also corrupted a SECOND field, which this test now pins: `priority_band`
+        is derived from the total, so zeroing banded every excluded prospect "Skip"
+        regardless of its real score. 40 employees -> tier 0 -> 5 of 10 points -> 0.5 x
+        factors_max 100 = 50, which is "Medium" (40-59). Not "Skip".
+
+        Consumers must order disqualified rows last rather than leaning on a 0 to sink
+        them -- the gateway does this in `prospects.service.ts`.
+        """
         got = self._score({"id": "p1", "company_name": "Tiny Co", "employee_count": "40",
                            "country": "USA"})
-        assert got["score"] == 0
+        assert got["score"] == 50, "the true score must survive disqualification"
         assert got["disqualified"] is True
         assert got["disqualifier_reason"] == "Below the size floor for a standalone program"
-        assert got["priority_band"] == "Skip"
+        assert got["priority_band"] == "Medium", "band follows the REAL score, not 0"
 
     def test_a_qualified_prospect_scores_and_bands_normally(self):
         got = self._score({"id": "p2", "company_name": "Big Co", "employee_count": "850",

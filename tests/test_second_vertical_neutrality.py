@@ -207,8 +207,12 @@ class TestEveryPrimitiveIsExercisedByThisVertical:
 
     def test_hard_rules_and_bands_work_for_this_vertical_too(self):
         small = _score({**BASE, "square_footage": "4,000"})
-        assert small["score"] == 0
-        assert small["priority_band"] == "Cold"
+        # Since 2026-08-26 a rule states ELIGIBILITY, not rank: the score survives and
+        # the band follows the REAL score rather than a manufactured 0. What must hold is
+        # that the row is FLAGGED -- consumers sort disqualified last instead of relying
+        # on a zero to sink it.
+        assert small["disqualified"] is True
+        assert small["score"] > 0, "a rule must not rewrite the score"
         assert "10,000 sq ft minimum" in small["disqualifier_reason"]
 
         wrong = _score({**BASE, "property_type": "Single-family rental"})
@@ -260,8 +264,14 @@ class TestAFullyQualifiedProspectScoresCoherently:
                          "trigger_type": "Permit", "trigger_date": "2026-03-01"})
         disqualified = _score({**BASE, "square_footage": "4,000"})
         item = _score(thin)
-        # Ordered on its own evidence: above the ruled-out row, below the strong one.
-        assert disqualified["score"] == 0 < item["score"] < strong["score"]
+        # Ordered on its own evidence: below the strong one, and above nothing by
+        # construction -- the ruled-out row is no longer forced to 0, so ELIGIBILITY is
+        # what separates it, not an artificially crushed score. Asserting the old
+        # `disqualified == 0` would have re-pinned exactly the flattening that made 21
+        # of 29 prospects on a real run render as worthless.
+        assert 0 < item["score"] < strong["score"]
+        assert disqualified["disqualified"] is True
+        assert item.get("disqualified") is not True
         # 15,000 sq ft (10/20) + Retail (8/10) and nothing else = 18 of 90, out of market.
         # That IS the bottom band, and asserting a friendlier one would have been me
         # deciding the answer rather than reading it.

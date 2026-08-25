@@ -2061,7 +2061,30 @@ def score_prospects(
         # The clamp above is applied AFTER `ai_adj`, deliberately: a base of 95 plus a +15
         # adjustment must land at `cap`, not above the top band, or the band lookup falls
         # off the end of the table and the best prospect in the run renders unbanded.
-        if dq_reason:
+        # 🔴 **The score SURVIVES disqualification by default.** It was zeroed until
+        # 2026-08-26, and that flattening destroyed real ranking information: on one run
+        # the 21 rule-excluded prospects had true scores of 14-61 while the best prospect
+        # that SURVIVED scored 52 -- six excluded prospects had outscored every survivor,
+        # and all 21 rendered as worthless. Indistinguishable from a broken scorer to a
+        # customer, and reported as one.
+        #
+        # Disqualification is carried by `disqualified` + `disqualifier_reason`, which is
+        # a statement about ELIGIBILITY, not rank. Keeping the total also fixes a SECOND
+        # corruption: `priority_band` is derived from `total` below, so zeroing banded
+        # every excluded prospect at the bottom regardless of its real score.
+        #
+        # ⚠️ **`zero_score_on_disqualify` exists for ONE reason: EAP parity.** The
+        # handed-over `eap-employer-scanner` ruled prospects out BEFORE scoring them --
+        # its CSV carries a `disqualified-before-scoring` flag with every component
+        # column empty -- so its published totals are 0 and its bands "Skip". We score
+        # first and decide after, so the only way to reproduce those numbers is to
+        # discard a total we did compute. That is a fidelity requirement of one
+        # reference config, NOT a scoring principle: it is opt-in, and no live skill
+        # sets it.
+        #
+        # Consumers must order disqualified rows last rather than leaning on a 0 to sink
+        # them -- the gateway does this in `prospects.service.ts`.
+        if dq_reason and bool(scoring.get("zero_score_on_disqualify")):
             total = 0
 
         # `disqualify_below` — authored by CSB-built skills since day one and read by

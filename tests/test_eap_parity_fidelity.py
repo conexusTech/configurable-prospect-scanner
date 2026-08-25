@@ -110,6 +110,19 @@ BANDS = [
 SCORING = {
     "score_cap": 100,
     "factors_max": 100,
+    # ⚠️ Opt-in ONLY here, to reproduce the published run.
+    #
+    # eap-employer-scanner ruled prospects out BEFORE scoring them: its CSV carries
+    # `disqualified-before-scoring` with every component column empty, a total of 0 and
+    # band "Skip". Our engine scores first and decides after, so the only way to match
+    # those numbers is to discard a total we actually computed.
+    #
+    # Since 2026-08-26 the engine KEEPS the score by default: zeroing flattened 21 of 29
+    # prospects on a real run whose true scores were 14-61, six of them above the best
+    # SURVIVING score of 52, which reads as a broken scorer to a customer. This flag is a
+    # fidelity requirement of this one reference config, not a scoring principle, and no
+    # live skill sets it.
+    "zero_score_on_disqualify": True,
     # The axes this vertical does not author. `region_bonus` at 0 is load-bearing:
     # delivery is remote nationwide, so location must never affect fit.
     "completeness": {"max": 0},
