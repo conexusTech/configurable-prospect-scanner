@@ -983,6 +983,14 @@ _BUDGET_AXES = ("completeness", "fit", "region_bonus", "multi_source", "pipeline
 #: Keys whose structured value must NOT be overlaid onto the scoring input: they are
 #: envelopes the scorer already reads through their own paths, and shadowing a merged
 #: field with the raw envelope would change what every other factor sees.
+#: Verdict keys a flattened lane row may NOT overwrite. Mirrors
+#: `aeo.phases.enrichment.RESERVED_LANE_KEYS`, which forbids them as lane KEYS but not
+#: as field names inside a row. Duplicated because the vendored engine must not import
+#: the `aeo` package; the mirror is asserted by a test.
+_LANE_VERDICT_KEYS = frozenset(
+    {"validated", "signals_found", "disqualifiers_hit", "reasoning"}
+)
+
 _STRUCTURED_RESERVED = frozenset(
     {"_internal", "discovery_data", "validation_data", "contacts_data", "_ai_judgment"}
 )
@@ -1945,10 +1953,50 @@ def score_prospects(
                 lead[key] = value
         enrichment = p.get("validation_data")
         if isinstance(enrichment, dict):
-            # Enrichment lanes are keyed by lane name, so a factor binds to a lane the
-            # same way it binds to a collected field.
+            # ⚠️ **VENDORED-ENGINE EDIT** — logged in UPSTREAM.md's edit table.
+            #
+            # A lane is exposed TWICE, and both are load-bearing:
+            #
+            #  1. under its own key, holding the row LIST — an event factor
+            #     (`base_points`) binds to the lane wholesale and walks the rows via
+            #     `_event_rows`, so removing this breaks every dated-signal factor;
+            #  2. each row's FIELDS, flattened — because a factor binds to one field
+            #     of a lane, not to the lane.
+            #
+            # 🔴 (2) was missing, and the whole stack agreed except the part that runs.
+            # `_lookup_field` is a FLAT lookup, so a factor bound to a lane field
+            # resolved to None and scored 0 for every prospect — while the schema
+            # advertises lanes as producing fields, the skill builder authors
+            # field-level bindings, and the gateway's `bindableFieldNames` validates
+            # them. Measured on a real MYgroup draft: two factors bound to
+            # `switching_likelihood` and `headcount_trend`, both lane fields, both 0 on
+            # all 15 prospects, the entire 35-point ICP axis dead, and 13 of 15
+            # prospects "ineligible" against a floor the surviving axes could not
+            # clear. Nothing errored anywhere.
+            #
+            # Three rules, each deliberate:
+            #  * `setdefault`, so a DISCOVERY field of the same name wins — discovery
+            #    observed it, a lane inferred it.
+            #  * first NON-EMPTY value wins across rows in order. A lane returning a
+            #    row with the field blank must not shadow a later row that has it;
+            #    `max_items: 1` makes single-row the common case, and this keeps
+            #    multi-row predictable rather than arbitrary.
+            #  * the qualification verdict's own keys are never overwritten by a row
+            #    field that happens to share the name (`RESERVED_LANE_KEYS` already
+            #    forbids them as lane KEYS; nothing stopped a row field).
             for lane, rows in enrichment.items():
                 lead.setdefault(lane, rows)
+                if not isinstance(rows, (list, tuple)):
+                    continue
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    for field, value in row.items():
+                        if field in _LANE_VERDICT_KEYS:
+                            continue
+                        if value is None or not str(value).strip():
+                            continue
+                        lead.setdefault(field, value)
         # ⚠️ **VENDORED-ENGINE EDIT** — logged in UPSTREAM.md's edit table.
         #
         # A model-decided stage wins over the date ladder. `aeo/phases/ai_judgment.py`
