@@ -144,12 +144,26 @@ Sweep = Callable[
 ]
 
 
+def normalize_company(name: Any) -> str:
+    """Normalise a company name for duplicate comparison.
+
+    🔑 Must stay byte-identical to the gateway's `lower(trim(company_name))` --
+    used both to build `known_companies` (`runtime-context.service.ts`) and to
+    catch collisions at insert (`existingCompanies` in
+    `runtime-scan-events.service.ts`). If the two normalisations ever diverge, this
+    filter excludes one set while the gateway drops a different one, and the symptom
+    is silent: prospects vanish with no error and no log.
+    """
+    return str(name or "").strip().lower()
+
+
 def capped_discover(
     sweep: Sweep,
     *,
     budget: ProspectBudget,
     emit: Callable[[dict[str, Any]], None],
     log: Callable[[str], None] = lambda _: None,
+    known_companies: set[str] | None = None,
 ) -> Callable[[dict[str, Any]], list[dict[str, Any]]]:
     """Wrap a discovery sweep so the ceiling applies BEFORE anything is forwarded.
 
@@ -182,6 +196,32 @@ def capped_discover(
             emit(event)
 
         found = sweep(ctx, _hold)
+
+        # Drop companies this org ALREADY holds, BEFORE the ceiling -- so an
+        # exclusion frees a slot for a genuinely new prospect instead of consuming
+        # one. The gateway still filters at insert; that catch is correct but it
+        # happens after the run has paid to discover, verify and enrich the
+        # duplicate, and after the ceiling was spent on it.
+        #
+        # Measured waste before this: 8.3% on a young org (15 companies held) and
+        # 38% on a mature one (498 held), the tax compounding with tenure. On run
+        # 126bcd6c it discarded a fully SCORED prospect -- 30 scored, 29 landed.
+        #
+        # An absent/empty list is a no-op, so this is safe in either deploy order:
+        # a scanner running against a gateway that does not send the field behaves
+        # exactly as before.
+        if known_companies:
+            fresh = [
+                p for p in found
+                if normalize_company(p.get("company_name")) not in known_companies
+            ]
+            if len(fresh) < len(found):
+                log(
+                    f"cross-run dedupe: dropped {len(found) - len(fresh)} of "
+                    f"{len(found)} discovered already held by this org"
+                )
+            found = fresh
+
         kept = budget.take(found)
         if len(kept) < len(found):
             log(

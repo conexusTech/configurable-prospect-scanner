@@ -298,3 +298,116 @@ def test_the_ceiling_bounds_verification_calls_not_just_rows():
     assert len(in_area) == 10
     assert rejects == []
     assert len(emitted[0]["items"]) == 10
+
+
+# ── cross-run dedupe: exclude BEFORE the ceiling ─────────────────────────
+
+
+def test_a_company_the_org_already_holds_is_never_forwarded():
+    found = [_p("a", "permits"), _p("b", "permits"), _p("c", "permits")]
+    emitted: list[dict] = []
+
+    discover = capped_discover(
+        _sweep(found),
+        budget=ProspectBudget(10),
+        emit=emitted.append,
+        known_companies={"firm b"},
+    )
+    kept = discover({})
+
+    assert {p["id"] for p in kept} == {"a", "c"}
+    forwarded = [e for e in emitted if e["type"] == "prospects"][0]
+    assert {i["id"] for i in forwarded["items"]} == {"a", "c"}
+
+
+def test_an_exclusion_FREES_a_ceiling_slot_rather_than_consuming_one():
+    """The whole point of filtering before the ceiling rather than after.
+
+    Held duplicates used to be discovered, verified, enriched and only then
+    discarded gateway-side at insert -- so each one consumed a ceiling slot a
+    genuinely new prospect could have had. Measured waste before this: 8.3% on a
+    young org and 38% on a mature one, the tax compounding with an org's tenure.
+
+    With a ceiling of 2 and one of the first three already held, a correct
+    implementation still returns 2 NEW prospects. An implementation that filtered
+    after the ceiling would return 1.
+    """
+    found = [_p("a", "permits"), _p("b", "permits"), _p("c", "permits")]
+
+    discover = capped_discover(
+        _sweep(found),
+        budget=ProspectBudget(2),
+        emit=lambda _: None,
+        known_companies={"firm a"},
+    )
+    kept = discover({})
+
+    assert len(kept) == 2, "an excluded duplicate must not spend a ceiling slot"
+    assert "a" not in {p["id"] for p in kept}
+
+
+def test_absent_or_empty_known_companies_is_a_no_op():
+    """Safe in either deploy order: a gateway that does not send the field yet."""
+    found = [_p("a", "permits"), _p("b", "permits")]
+
+    for known in (None, set()):
+        discover = capped_discover(
+            _sweep(found),
+            budget=ProspectBudget(10),
+            emit=lambda _: None,
+            known_companies=known,
+        )
+        assert len(discover({})) == 2
+
+
+def test_matching_ignores_case_and_surrounding_whitespace():
+    """Must mirror the gateway's `lower(trim(company_name))` exactly.
+
+    If the two normalisations diverge this filter excludes one set while the
+    gateway drops a different one, and the symptom is silent -- prospects vanish
+    with no error and no log.
+    """
+    found = [
+        {"id": "x", "company_name": "  ACME Roofing  "},
+        {"id": "y", "company_name": "Other Co"},
+    ]
+    discover = capped_discover(
+        _sweep(found),
+        budget=ProspectBudget(10),
+        emit=lambda _: None,
+        known_companies={"acme roofing"},
+    )
+    assert {p["id"] for p in discover({})} == {"y"}
+
+
+def test_a_missing_or_blank_company_name_is_never_excluded():
+    """A nameless row cannot be proved a duplicate, so it must survive."""
+    found = [
+        {"id": "n1", "company_name": None},
+        {"id": "n2", "company_name": ""},
+        {"id": "n3"},
+    ]
+    discover = capped_discover(
+        _sweep(found),
+        budget=ProspectBudget(10),
+        emit=lambda _: None,
+        known_companies={"acme roofing"},
+    )
+    assert len(discover({})) == 3
+
+
+def test_the_dedupe_is_reported_not_silent():
+    """A cap that quietly drops work reads as 'covered everything' when it did not."""
+    found = [_p("a", "permits"), _p("b", "permits")]
+    lines: list[str] = []
+
+    discover = capped_discover(
+        _sweep(found),
+        budget=ProspectBudget(10),
+        emit=lambda _: None,
+        log=lines.append,
+        known_companies={"firm a"},
+    )
+    discover({})
+
+    assert any("cross-run dedupe" in ln and "1 of 2" in ln for ln in lines)

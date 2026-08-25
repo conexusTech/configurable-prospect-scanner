@@ -71,6 +71,7 @@ from aeo.phases.geo_loop import DEFAULT_MAX_ROUNDS, discover_in_area  # noqa: E4
 from aeo.phases.prospect_budget import (  # noqa: E402
     ProspectBudget,
     capped_discover,
+    normalize_company,
 )
 from aeo.phases.query_expansion import (  # noqa: E402
     DEFAULT_MAX_QUERIES_PER_SOURCE,
@@ -726,6 +727,16 @@ def main() -> int:
             budget=budget,
             emit=sink.emit,
             log=_log,
+            # Companies this org already holds, so a duplicate is dropped BEFORE the
+            # ceiling rather than after the run has paid to discover, verify and
+            # enrich it. Normalised here with the same helper the filter uses, so a
+            # gateway that has not shipped the field yet simply yields an empty set
+            # and the run behaves exactly as before.
+            known_companies={
+                normalize_company(n)
+                for n in (aeo_context.get("known_companies") or [])
+                if normalize_company(n)
+            },
         )
 
         geo_rejects: list[dict[str, Any]] = []
