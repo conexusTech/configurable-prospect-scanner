@@ -79,6 +79,7 @@ from aeo.phases.query_expansion import (  # noqa: E402
     unexpanded_placeholders,
 )
 from aeo.phases.ai_judgment import judge_prospects
+from aeo.phases.enrichment import enrich_prospects  # noqa: E402
 from aeo.phases.validation import surviving_ids, validate_prospects  # noqa: E402
 from aeo.phases.zip_discovery import (  # noqa: E402
     DEFAULT_MAX_ZIPS_PER_MARKET,
@@ -783,6 +784,68 @@ def main() -> int:
                 parse_json_array=als.parse_json_array,
                 emit=sink.emit,
             )
+
+        # ── enrichment lanes ──────────────────────────────────────────────
+        # N authored lanes, each attaching its own shape of fact to a prospect the
+        # verdict above already accepted. Runs BEFORE the `validations` emission so the
+        # lane rows travel inside the same `validation_data` the verdict does — one
+        # write, one shape, no migration.
+        lane_defs = (config.get("validation") or {}).get("lanes")
+        if PHASE_VALIDATION in phases and lane_defs:
+            # Only prospects that survived geography and qualification. Enriching a
+            # prospect already known to be disqualified is spend on a conclusion nobody
+            # will read — the same rule validation applies to its own disqualifiers.
+            judged_so_far = geo_rejects + validations
+            kept = surviving_ids(judged_so_far) if judged_so_far else None
+            rejected = {v["prospect_id"] for v in judged_so_far}
+            lane_targets = [
+                p
+                for p in prospects
+                if p.get("id")
+                and (kept is None or p["id"] not in rejected or p["id"] in kept)
+            ]
+            lane_results = enrich_prospects(
+                lane_targets,
+                lanes=lane_defs,
+                provider=provider,
+                provider_config=provider_config,
+                parse_json_array=als.parse_json_array,
+                scan_date=today.isoformat(),
+                emit=sink.emit,
+                log=_log,
+            )
+            # Merge each prospect's lane rows into its verdict, creating a verdict-shaped
+            # entry for a prospect that was never judged (no `validation` section, or it
+            # was skipped) so the rows still reach AEO and the scorer.
+            by_id = {v["prospect_id"]: v for v in validations}
+            for entry in lane_results:
+                pid = entry["prospect_id"]
+                target = by_id.get(pid)
+                if target is None:
+                    target = {"prospect_id": pid, "validation_data": {}}
+                    validations.append(target)
+                    by_id[pid] = target
+                target.setdefault("validation_data", {}).update(entry["lanes"])
+            _log(
+                f"enriched {len(lane_results)} prospects across "
+                f"{len(lane_defs)} lane(s)"
+            )
+
+        # The scorer reads lane rows off the prospect, so put them there. Without this
+        # the rows persist to AEO and are invisible to every factor that binds to a lane.
+        if validations:
+            data_by_id = {
+                v["prospect_id"]: v.get("validation_data") for v in validations
+            }
+            for p in prospects:
+                incoming = data_by_id.get(p.get("id"))
+                if isinstance(incoming, dict):
+                    existing = p.get("validation_data")
+                    p["validation_data"] = (
+                        {**existing, **incoming}
+                        if isinstance(existing, dict)
+                        else dict(incoming)
+                    )
 
         # One `validations` emission covering both kinds of rejection, so AEO sees a
         # single coherent verdict per prospect rather than two competing ones.

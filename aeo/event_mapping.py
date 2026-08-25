@@ -68,6 +68,17 @@ SCORED_PASSTHROUGH = (
     # dropped one line before the wire. Listed with its parity test rather than trusted.
     "signal_event",
     "signal_date",
+    # Added 2026-08-24, and `disqualified` is the FIFTH omission from this tuple —
+    # except this one had already shipped. The engine has computed it from
+    # `scoring.disqualify_below` since 2026-08-12 and all three production skills author
+    # `disqualify_below: 40`, so it was computed on every prospect of every real run and
+    # dropped one line before the wire. Nothing errored; the flag simply never existed
+    # for anyone downstream. AEO declares all three on `ScanScoredItemDto` (gateway
+    # first — `forbidNonWhitelisted` is global, so emitting one it does not declare
+    # rejects the WHOLE scored callback).
+    "disqualified",
+    "disqualifier_reason",
+    "priority_band",
 )
 
 # Fields on the engine's `prospects` item that map straight onto AEO columns.

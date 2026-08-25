@@ -962,8 +962,30 @@ _DEFAULT_SCORING: dict[str, Any] = {
         "default": {"status": None, "detail": "No timing evidence available.", "score": 0},
     },
     "ai_adjustment": {"min": -15, "max": 15},
+    #: Budget for the skill's own `scoring.factors`, as its OWN axis.
+    #:
+    #: `None` keeps the legacy behaviour: authored factors BORROW the `fit` axis (at 40
+    #: unless `fit.max` is authored), so a config that never heard of this key scores
+    #: exactly as before. Set it and factors become independent of `fit`, which is what
+    #: lets a skill put its whole 0-100 budget on its own criteria and zero the axes it
+    #: never authored — a vertical whose fit is not geographic sets `region_bonus.max: 0`,
+    #: one with no construction timeline sets `pipeline.max: 0`.
+    #:
+    #: A scalar rather than `factors.max` because `scoring.factors` is a LIST.
+    "factors_max": None,
     "score_cap": 100,
 }
+
+
+#: Axes that own a slice of `score_cap`. Used only for the load-time budget warning.
+_BUDGET_AXES = ("completeness", "fit", "region_bonus", "multi_source", "pipeline")
+
+#: Keys whose structured value must NOT be overlaid onto the scoring input: they are
+#: envelopes the scorer already reads through their own paths, and shadowing a merged
+#: field with the raw envelope would change what every other factor sees.
+_STRUCTURED_RESERVED = frozenset(
+    {"_internal", "discovery_data", "validation_data", "contacts_data", "_ai_judgment"}
+)
 
 
 def _deep_get(scoring: dict[str, Any], key: str) -> dict[str, Any]:
@@ -1017,7 +1039,444 @@ def _first_number(text: str) -> float | None:
         return None
 
 
-def _factor_credit(lead: dict[str, Any], name: str, spec: dict[str, Any]) -> float:
+def factor_label(spec: dict[str, Any]) -> str:
+    """The name this factor is REPORTED under, which is not necessarily what it reads.
+
+    `key` when authored, else `name`. Configs with no `key` are unaffected, so the
+    per-factor breakdown an operator already sees keeps its existing labels.
+    """
+    key = str(spec.get("key") or "").strip()
+    return key or str(spec.get("name") or "").strip()
+
+
+def factor_source_fields(spec: dict[str, Any]) -> tuple[str, ...]:
+    """The collected field(s) this factor READS, in priority order.
+
+    Three-way split — `key` identifies, `source_field` binds, `name` labels — because
+    conflating identity with binding is a measured production defect: a skill authored
+    `multi_site_portfolio` / `recent_mechanical_permit` / `building_age` while collecting
+    `portfolio_size`, `permit_date` and nothing at all, so three of four factors scored
+    zero for every prospect, forever, with no error anywhere.
+
+    `source_field` may be a LIST, which is how one factor reads two discovery lanes that
+    named the same quantity differently ("Estimated Headcount" in one sweep, "Employee
+    Estimate" in another). First candidate that carries a value wins.
+
+    ⚠️ Still an EXPLICIT binding, never an inferred one. Guessing that
+    `multi_site_portfolio` means `portfolio_size` is the same silent inference this whole
+    class of defect is made of — the fix is that the author can now SAY it.
+    """
+    raw = spec.get("source_field")
+    if isinstance(raw, (list, tuple)):
+        fields = [str(f).strip() for f in raw if str(f).strip()]
+    elif isinstance(raw, str) and raw.strip():
+        fields = [raw.strip()]
+    else:
+        fields = []
+    if not fields:
+        name = str(spec.get("name") or "").strip()
+        fields = [name] if name else []
+    return tuple(fields)
+
+
+def _tier_credit(text: str, tiers: Any) -> float:
+    """Graded credit from a threshold table: `[{threshold, points}, ...]`.
+
+    The highest threshold the value MEETS wins, so the table may be non-monotonic — a
+    sweet-spot curve (peak in the middle, lower at both ends) is the normal case for a
+    size band, not an exception. Credit is `points / max(points in table)`, which keeps
+    this on the same [0, 1] scale the weight normalization already uses: a factor's
+    `weight` stays its share of the axis and the table only says how much of that share
+    this value earned.
+
+    Returns 0.0 when the value carries no number, when it is below every threshold, or
+    when the table awards no positive points anywhere.
+    """
+    parsed: list[tuple[float, float]] = []
+    for entry in tiers if isinstance(tiers, (list, tuple)) else ():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            parsed.append((float(entry["threshold"]), float(entry.get("points", 0) or 0)))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not parsed:
+        return 0.0
+    ceiling = max(p for _, p in parsed)
+    if ceiling <= 0:
+        return 0.0
+    num = _first_number(text)
+    if num is None:
+        return 0.0
+    for threshold, points in sorted(parsed, key=lambda tp: -tp[0]):
+        if num >= threshold:
+            return max(0.0, min(1.0, points / ceiling))
+    return 0.0
+
+
+def normalize_keyword_table(keywords: Any) -> list[tuple[str, float]]:
+    """Accept the three shapes a keyword→points table is naturally authored in.
+
+    * `{"bundled": 20, "none": 14}` — the concise form.
+    * `[{"keyword": "bundled", "points": 20}, ...]` — one keyword per entry.
+    * `[{"keywords": ["county", "municipality"], "points": 20}, ...]` — a named bucket
+      with several spellings sharing one score, which is how a ranked industry list is
+      written.
+
+    All three are unambiguous, so accepting all three makes porting an existing config a
+    translation of structure rather than of meaning.
+    """
+    table: list[tuple[str, float]] = []
+
+    def add(word: Any, points: Any) -> None:
+        text = str(word or "").strip().lower()
+        if not text:
+            return
+        try:
+            table.append((text, float(points)))
+        except (TypeError, ValueError):
+            return
+
+    if isinstance(keywords, dict):
+        for word, points in keywords.items():
+            add(word, points)
+    elif isinstance(keywords, (list, tuple)):
+        for entry in keywords:
+            if not isinstance(entry, dict):
+                continue
+            points = entry.get("points", entry.get("fit_score"))
+            words = entry.get("keywords")
+            if isinstance(words, (list, tuple)) and words:
+                for word in words:
+                    add(word, points)
+            else:
+                add(entry.get("keyword", entry.get("name")), points)
+    return table
+
+
+def _keyword_credit(text: str, keywords: Any) -> float:
+    """Graded credit from a keyword→points table. **Longest match wins.**
+
+    ⚠️ Longest-match, deliberately NOT table order and NOT first match. Keyword tables
+    routinely contain one term that is a substring of another — `standalone` inside
+    `standalone-recent` — and with order-dependent matching the shorter, wrong, and
+    usually *higher*-scoring term wins by accident. Making length decide means an author
+    cannot break their own table by reordering it, and the same rule already settled this
+    class of bug elsewhere in the platform.
+
+    Ties on length are broken by the higher score, only so the result is deterministic
+    rather than dependent on dict insertion order.
+    """
+    table = normalize_keyword_table(keywords)
+    if not table:
+        return 0.0
+    ceiling = max(points for _, points in table)
+    if ceiling <= 0:
+        return 0.0
+    haystack = text.lower()
+    matched = [(word, points) for word, points in table if word in haystack]
+    if not matched:
+        return 0.0
+    _, points = sorted(matched, key=lambda wp: (-len(wp[0]), -wp[1]))[0]
+    return max(0.0, min(1.0, points / ceiling))
+
+
+_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def parse_signal_date(text: Any) -> date | None:
+    """A STRICT date parse, for recency. Returns None rather than guessing.
+
+    ⚠️ **Deliberately not `parse_estimated_date`.** That function exists to estimate a
+    project *completion* date and ends with a bare-year fallback that invents a month
+    (`_estimate_month` returns 6 when it recognizes nothing), which is exactly how
+    fabricated dates got manufactured. For recency that is not a smaller error, it is a
+    different answer: "2019" becoming 2019-06-01 silently places a signal inside or
+    outside a trailing-12-month window depending on nothing.
+
+    So: **a bare year is refused.** A month must be known. Handled forms, all observed in
+    real collected data — `2026-07-30`, `2026-07`, `02/14/2024`, `August 2026`,
+    `April 27, 2023`, `27 April 2023`. Day defaults to 1 only when the MONTH is known,
+    which is a precision limit, not an invention.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    low = raw.lower()
+
+    def _mk(y: int, m: int, d: int = 1) -> date | None:
+        # ⚠️ No day clamping. An earlier cut clamped anything past 28 "to be safe" and
+        # silently turned a valid 2026-07-30 into 2026-07-28 — inventing a different date,
+        # which is the exact failure this parser exists to avoid. An impossible day (Feb
+        # 30) is producer garbage and becomes None, i.e. "undated", which downstream
+        # treats as base-credit-no-bonus rather than as a date it made up.
+        if not (1900 <= y <= 2100):
+            return None
+        try:
+            return date(y, m, d)
+        except ValueError:
+            return None
+
+    m = re.search(r"\b(\d{4})-(\d{1,2})(?:-(\d{1,2}))?\b", low)      # 2026-07-30 / 2026-07
+    if m:
+        return _mk(int(m.group(1)), int(m.group(2)), int(m.group(3) or 1))
+    m = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", low)            # 02/14/2024 (US)
+    if m:
+        return _mk(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+    m = re.search(r"\b(\d{1,2})/(\d{4})\b", low)                      # 07/2026
+    if m:
+        return _mk(int(m.group(2)), int(m.group(1)))
+    names = "|".join(_MONTHS)
+    m = re.search(rf"\b({names})[a-z]*\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(\d{{4}})\b", low)
+    if m:                                                            # April 27, 2023
+        return _mk(int(m.group(3)), _MONTHS[m.group(1)], int(m.group(2)))
+    m = re.search(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({names})[a-z]*\.?\s+(\d{{4}})\b", low)
+    if m:                                                            # 27 April 2023
+        return _mk(int(m.group(3)), _MONTHS[m.group(2)], int(m.group(1)))
+    m = re.search(rf"\b({names})[a-z]*\.?\s+(\d{{4}})\b", low)
+    if m:                                                            # August 2026
+        return _mk(int(m.group(2)), _MONTHS[m.group(1)])
+    return None  # a bare year lands here, and that is the point
+
+
+def _event_rows(raw: Any) -> list[dict[str, Any]]:
+    """Normalize whatever the field held into rows an event factor can walk.
+
+    An enrichment lane returns a LIST of rows (one employer can carry several dated
+    events). A single dict is one row; anything else is one row under a synthetic key so a
+    flat field still works.
+    """
+    if isinstance(raw, list):
+        return [r if isinstance(r, dict) else {"value": r} for r in raw]
+    if isinstance(raw, dict):
+        return [raw]
+    return [{"value": raw}] if str(raw or "").strip() else []
+
+
+def _event_signal_credit(
+    raw: Any,
+    spec: dict[str, Any],
+    *,
+    today: date | None,
+    lead: dict[str, Any] | None = None,
+) -> float:
+    """Graded credit from dated EVENTS, with a recency window and a bonus keyword set.
+
+    The shape a timing factor actually needs and the other modes cannot express: some
+    events are worth more than others (`bonus_keywords`, e.g. a live procurement notice
+    against a routine renewal), and an old event is worth nothing however strong it was.
+
+    Credit is `best_row_points / (base_points + bonus_points)` — same relative scale as
+    `tiers` and `keywords`, so `weight` still owns the factor's share of the axis. The
+    BEST surviving row wins; several current events do not stack, because two signals are
+    not twice as in-market as one.
+
+    Two judgement calls, both erring toward not inventing a verdict:
+
+    * **An undated row earns the base, never the bonus.** Excluding it would let missing
+      evidence silently shrink a result set; awarding the recency-gated bonus would assert
+      a freshness nothing established.
+    * **A row dated in the FUTURE is current**, not out of window. A scheduled renewal is
+      a timing signal.
+    """
+    try:
+        base = float(spec.get("base_points", 0) or 0)
+        bonus = float(spec.get("bonus_points", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    ceiling = base + bonus
+    if ceiling <= 0:
+        return 0.0
+
+    keywords = [
+        str(k).strip().lower()
+        for k in (spec.get("bonus_keywords") or [])
+        if str(k).strip()
+    ]
+    date_field = str(spec.get("date_field") or "").strip()
+    try:
+        window = int(spec.get("recency_months") or 0)
+    except (TypeError, ValueError):
+        window = 0
+
+    best: float | None = None
+    for row in _event_rows(raw):
+        dated = parse_signal_date(row.get(date_field)) if date_field else None
+        # SIBLING-FIELD fallback. An enrichment lane returns rows that carry their own
+        # date, but a discovery source flattens the same information into two fields side
+        # by side (`trigger_type` and `trigger_date`), which is how a real existing config
+        # already collects it. Without this, event mode silently degrades to "undated" on
+        # every such config — base credit, never the bonus, recency never applied — and
+        # nothing says so. Only consulted when the row itself has no date.
+        if dated is None and date_field and lead is not None:
+            dated = parse_signal_date(_lookup_field(lead, date_field))
+        if window > 0 and dated is not None and today is not None:
+            # AGE, so the arguments are (today, dated): `_months_between(a, b)` is a - b,
+            # which for a past signal is NEGATIVE and could never exceed the window — an
+            # inverted sign here silently disables the whole gate and every stale signal
+            # scores full. A future date gives a negative age and stays current.
+            if _months_between(today, dated) > window:
+                continue
+        haystack = " ".join(str(v) for v in row.values()).lower()
+        earned = base
+        if keywords and dated is not None and any(k in haystack for k in keywords):
+            earned += bonus
+        elif keywords and not date_field and any(k in haystack for k in keywords):
+            # No recency gate configured at all: the bonus is not conditioned on a date.
+            earned += bonus
+        best = earned if best is None else max(best, earned)
+
+    if best is None:
+        return 0.0
+    return max(0.0, min(1.0, best / ceiling))
+
+
+def hard_disqualifier(lead: dict[str, Any], rules: Any) -> str | None:
+    """The reason the FIRST matching rule excludes this prospect, or None.
+
+    **Ineligible is not the same as low-scoring**, and conflating them is why this exists.
+    `disqualify_below` is a ranking statement: the operator picked a cutoff and wants to
+    see what fell under it. A rule here says the prospect cannot be sold to at all — too
+    small, wrong country, a multi-year contract signed with someone else last month — and
+    no threshold on a score can express that, because a disqualified prospect may still
+    score well on every other axis.
+
+    Evaluated BEFORE any factor work, so a ruled-out prospect costs nothing to score and
+    cannot end up recorded as both strongly-fitting and excluded.
+
+    Rule primitives, deliberately few and all industry-neutral:
+
+    * `below` / `above` — the first number in the field is outside the bound.
+    * `keywords` — any of these appears in the field.
+    * `required_keywords` — NONE of these appears in the field.
+
+    ⚠️ **A rule never fires on a field the prospect does not carry.** Absence of evidence
+    is not grounds for exclusion — the same rule validation follows for its own verdict —
+    so a missing country does not mean "not in the US". A rule that should fire on
+    absence is a rule about a field the discovery sources must be made to collect.
+    """
+    for rule in rules if isinstance(rules, (list, tuple)) else ():
+        if not isinstance(rule, dict):
+            continue
+        raw = None
+        for candidate in factor_source_fields(rule):
+            raw = _lookup_field(lead, candidate)
+            if raw is not None:
+                break
+        text = str(raw if raw is not None else "").strip()
+        if not text:
+            continue  # nothing to judge — see the warning above
+
+        hit = False
+        number = _first_number(text)
+        for bound, worse in (("below", True), ("above", False)):
+            if rule.get(bound) is None or number is None:
+                continue
+            try:
+                limit = float(rule[bound])
+            except (TypeError, ValueError):
+                continue
+            if (number < limit) if worse else (number > limit):
+                hit = True
+
+        haystack = text.lower()
+        words = [str(k).strip().lower() for k in (rule.get("keywords") or ()) if str(k).strip()]
+        if words and any(w in haystack for w in words):
+            hit = True
+        required = [
+            str(k).strip().lower()
+            for k in (rule.get("required_keywords") or ())
+            if str(k).strip()
+        ]
+        if required and not any(w in haystack for w in required):
+            hit = True
+
+        if hit:
+            return (
+                str(rule.get("reason") or "").strip()
+                or str(rule.get("key") or rule.get("name") or "").strip()
+                or "Disqualified by rule"
+            )
+    return None
+
+
+def priority_band(score: int, bands: Any) -> str | None:
+    """The authored label for a score. None when the skill authored no bands.
+
+    A number ranks; a band says what to do about it. Accepts `{range: [lo, hi]}` or
+    `{min, max}` — both spellings appear in real configs and neither is ambiguous.
+    """
+    for band in bands if isinstance(bands, (list, tuple)) else ():
+        if not isinstance(band, dict):
+            continue
+        span = band.get("range")
+        try:
+            if isinstance(span, (list, tuple)) and len(span) == 2:
+                lo, hi = float(span[0]), float(span[1])
+            else:
+                lo = float(band.get("min", 0) or 0)
+                hi = float(band.get("max", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if lo <= score <= hi:
+            label = str(band.get("label") or band.get("name") or "").strip()
+            return label or None
+    return None
+
+
+def band_coverage_gap(bands: Any, cap: int) -> str | None:
+    """A human-readable description of the first gap or overlap, or None if clean.
+
+    Advisory only. A gap means some achievable score has no verdict at all, which is
+    invisible until the one prospect that lands there renders with an empty column.
+    """
+    spans: list[tuple[int, int, str]] = []
+    for band in bands if isinstance(bands, (list, tuple)) else ():
+        if not isinstance(band, dict):
+            continue
+        span = band.get("range")
+        try:
+            if isinstance(span, (list, tuple)) and len(span) == 2:
+                lo, hi = int(span[0]), int(span[1])
+            else:
+                lo, hi = int(band.get("min", 0) or 0), int(band.get("max", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        spans.append((lo, hi, str(band.get("label") or "?")))
+    if not spans:
+        return None
+    spans.sort()
+    if spans[0][0] > 0:
+        return f"scores 0-{spans[0][0] - 1} have no band"
+    cursor = spans[0][1]
+    for lo, hi, label in spans[1:]:
+        if lo > cursor + 1:
+            return f"scores {cursor + 1}-{lo - 1} have no band"
+        if lo <= cursor:
+            return f"band '{label}' overlaps the one below it at {lo}"
+        cursor = max(cursor, hi)
+    if cursor < cap:
+        return f"scores {cursor + 1}-{cap} have no band"
+    return None
+
+
+def _lookup_field(lead: dict[str, Any], name: str) -> Any:
+    """One field, exact then punctuation/case-insensitive. Returns None if empty."""
+    raw = lead.get(name)
+    if raw is not None and str(raw).strip():
+        return raw
+    norm = _norm_key(name)
+    return next(
+        (v for k, v in lead.items() if _norm_key(k) == norm and str(v).strip()), None
+    )
+
+
+def _factor_credit(
+    lead: dict[str, Any], name: str, spec: dict[str, Any], *, today: date | None = None
+) -> float:
     """Credit in [0, 1] for one authored factor, from the data actually collected.
 
     **Presence is the evidence.** A factor names a field the skill asked for; if the
@@ -1027,14 +1486,47 @@ def _factor_credit(lead: dict[str, Any], name: str, spec: dict[str, Any]) -> flo
 
     Deliberately NOT a keyword table: that is what tied the previous scorer to one
     industry.
+
+    **Presence is only the DEFAULT mode.** Authoring a graded table switches this factor
+    to it, and the mode is derived from which table is present rather than from a separate
+    `type` field — so a table can never be authored and then silently ignored, which is
+    the failure this codebase keeps producing:
+
+    * `tiers`       — `[{threshold, points}]`, graded by a numeric value. `_tier_credit`.
+    * `keywords`    — keyword → points, graded by text. `_keyword_credit`.
+    * `base_points` — dated events with a recency window. `_event_signal_credit`.
+
+    Both bypass `min`/`max`, which exist only to turn *presence* into a threshold; a table
+    already states the whole curve. That also removes the inversion `max` causes here — a
+    value ABOVE `max` scores 0.0, so "managing 8 property types" earned less than 4 — and
+    makes "at least 2 earns partial credit, 5 or more earns full" expressible at all,
+    which is what several live factors already promise in their own descriptions.
     """
-    raw = lead.get(name)
-    if raw is None or not str(raw).strip():
-        norm = _norm_key(name)
-        raw = next((v for k, v in lead.items() if _norm_key(k) == norm and str(v).strip()), None)
+    raw = None
+    for candidate in factor_source_fields(spec) or (name,):
+        raw = _lookup_field(lead, candidate)
+        if raw is not None:
+            break
+
+    # Event mode reads the RAW value, because a lane hands back a list of rows that
+    # stringifying would destroy. Checked before the emptiness guard for the same reason.
+    if spec.get("base_points") is not None:
+        return _event_signal_credit(raw, spec, today=today, lead=lead)
+
     text = str(raw if raw is not None else "").strip()
     if not text:
         return 0.0
+
+    tiers, keywords = spec.get("tiers"), spec.get("keywords")
+    has_tiers = isinstance(tiers, (list, tuple)) and bool(tiers)
+    has_keywords = bool(normalize_keyword_table(keywords))
+    # Both tables authored is ambiguous. Resolved deterministically here (tiers win) and
+    # WARNED about once per run in `score_prospects`, which is where the log lives —
+    # silence is how an ignored table gets shipped.
+    if has_tiers:
+        return _tier_credit(text, tiers)
+    if has_keywords:
+        return _keyword_credit(text, keywords)
 
     num = _first_number(text)
     lo, hi = spec.get("min"), spec.get("max")
@@ -1050,7 +1542,7 @@ def _factor_credit(lead: dict[str, Any], name: str, spec: dict[str, Any]) -> flo
 
 
 def score_config_factors(
-    lead: dict[str, Any], factors: Any, max_points: int
+    lead: dict[str, Any], factors: Any, max_points: int, *, today: date | None = None
 ) -> tuple[int, dict[str, float]]:
     """Score the skill's OWN authored `scoring.factors`, normalized to `max_points`.
 
@@ -1069,7 +1561,11 @@ def score_config_factors(
         if not isinstance(spec, dict):
             continue
         name = str(spec.get("name") or "").strip()
-        if not name:
+        # A factor is usable if it has EITHER a label or a binding. Requiring `name`
+        # here silently skipped any factor bound only by `source_field` — the same
+        # invisible-skip failure this three-way split exists to remove. The schema still
+        # requires `name` as the human label; the engine no longer depends on it to read.
+        if not name and not factor_source_fields(spec):
             continue
         try:
             weight = float(spec.get("weight", 1) or 0)
@@ -1077,10 +1573,10 @@ def score_config_factors(
             weight = 0.0
         if weight <= 0:
             continue
-        credit = _factor_credit(lead, name, spec)
+        credit = _factor_credit(lead, name, spec, today=today)
         total_weight += weight
         earned += weight * credit
-        detail[name] = round(credit, 3)
+        detail[factor_label(spec) or name] = round(credit, 3)
     if total_weight <= 0:
         return 0, detail
     return round((earned / total_weight) * max_points), detail
@@ -1350,15 +1846,69 @@ def score_prospects(
     if not (scoring.get("completeness") or {}).get("fields"):
         c_cfg = {**c_cfg, "fields": list(canonical) or list(_IDENTITY_ALIASES)}
     authored_factors = scoring.get("factors")
-    #: When a skill authors its own factors they become the LARGEST axis — larger than
-    #: pipeline timing (30) — unless the config sets `fit.max` itself. The operator's
-    #: stated ICP is the best signal available about who is worth calling; leaving it at
-    #: the legacy `fit` weight of 25 made it a minority of a score dominated by axes
-    #: nobody authored. Every axis max stays overridable via `context["scoring"]`.
-    if isinstance(authored_factors, list) and authored_factors and not (
-        scoring.get("fit") or {}
-    ).get("max"):
+    has_factors = isinstance(authored_factors, list) and bool(authored_factors)
+
+    #: Two modes, and the default is unchanged.
+    #:
+    #: LEGACY (`factors_max` absent): authored factors BORROW the `fit` axis — the
+    #: largest single axis at 40, larger than pipeline timing — because the operator's
+    #: stated ICP is the best signal available about who is worth calling, and leaving it
+    #: at the legacy `fit` weight of 25 made it a minority of a score dominated by axes
+    #: nobody authored.
+    #:
+    #: OWN-AXIS (`factors_max` set): factors are independent of `fit`, so a skill can put
+    #: its whole budget on its own criteria and zero the axes it never authored.
+    factors_max_cfg = scoring.get("factors_max")
+    legacy_factor_axis = has_factors and factors_max_cfg is None
+
+    # ⚠️ `is None`, NOT falsy. `fit.max: 0` is a legitimate authored value — it is how a
+    # skill says "this axis contributes nothing" — and a falsy test read it as unset and
+    # silently restored 40, which is the opposite of what was asked for.
+    if legacy_factor_axis and (scoring.get("fit") or {}).get("max") is None:
         f_cfg = {**f_cfg, "max": 40}
+
+    # A factor carrying BOTH graded tables is ambiguous. `tiers` wins deterministically,
+    # but say so — the whole point of deriving the mode from the authored table is that a
+    # table can never be silently ignored, and picking one quietly would reintroduce that.
+    if has_factors:
+        both = [
+            factor_label(s) or str(s.get("name") or "?")
+            for s in authored_factors
+            if isinstance(s, dict)
+            and isinstance(s.get("tiers"), (list, tuple)) and s.get("tiers")
+            and normalize_keyword_table(s.get("keywords"))
+        ]
+        if both:
+            _log_from(ctx)(
+                "scoring: factors with BOTH tiers and keywords, scoring by tiers: "
+                + ", ".join(both)
+            )
+
+    dq_rules = scoring.get("disqualify_rules")
+    bands = scoring.get("priority_bands")
+    gap = band_coverage_gap(bands, cap)
+    if gap:
+        _log_from(ctx)(f"scoring: priority_bands — {gap}")
+
+    # Budget advisory. **Warn, never fail:** over-budget is authorable and the documented
+    # behaviour is to clamp at `score_cap`, so refusing to run would reject configs that
+    # score correctly. Silence is the actual hazard — a skill whose axes sum to 60 can
+    # never produce a top-band prospect, and nothing anywhere says so.
+    try:
+        budget = sum(int(_deep_get(scoring, a).get("max", 0) or 0) for a in _BUDGET_AXES)
+        if has_factors:
+            budget += int(
+                (f_cfg.get("max", 25) if legacy_factor_axis else factors_max_cfg) or 0
+            )
+            if legacy_factor_axis:
+                budget -= int(f_cfg.get("max", 25) or 0)  # borrowed, not additional
+        if budget != cap:
+            _log_from(ctx)(
+                f"scoring: axis budget {budget} != score_cap {cap} — "
+                f"{'unreachable top band' if budget < cap else 'clamped at cap'}"
+            )
+    except (TypeError, ValueError, AttributeError):
+        pass
 
     # ── org-sourced values ────────────────────────────────────────────────────
     # Anything the engine needs that the skill config does not carry comes from the
@@ -1384,6 +1934,21 @@ def score_prospects(
     scored: list[dict[str, Any]] = []
     for p in prospects:
         lead = _scoring_input(p, canonical)
+
+        # `_merge_raw_rows` STRINGIFIES every value, because discovery merging exists to
+        # produce text a keyword match can read. That destroys structure: a list of dated
+        # event rows arrives as "{'signal_type': ...}" — one element, as a string — so an
+        # event factor walking rows would see nothing at all and score every prospect the
+        # same. Overlay the structured values back, without touching the merge itself.
+        for key, value in p.items():
+            if isinstance(value, (list, dict)) and key not in _STRUCTURED_RESERVED:
+                lead[key] = value
+        enrichment = p.get("validation_data")
+        if isinstance(enrichment, dict):
+            # Enrichment lanes are keyed by lane name, so a factor binds to a lane the
+            # same way it binds to a collected field.
+            for lane, rows in enrichment.items():
+                lead.setdefault(lane, rows)
         # ⚠️ **VENDORED-ENGINE EDIT** — logged in UPSTREAM.md's edit table.
         #
         # A model-decided stage wins over the date ladder. `aeo/phases/ai_judgment.py`
@@ -1398,15 +1963,40 @@ def score_prospects(
         pipeline = _pipeline_from_judgment(p, p_cfg) or calculate_pipeline(
             lead, p_cfg, today
         )
+        # Ruled out BEFORE any factor work: a disqualified prospect costs nothing to
+        # score, and cannot end up recorded as both strongly-fitting and excluded.
+        dq_reason = hard_disqualifier(lead, dq_rules)
+
         completeness = score_completeness(lead, c_cfg)
-        # Authored factors take precedence over the legacy keyword table and occupy the
-        # same axis (`fit.max`), so the 0-100 scale is unchanged.
-        if isinstance(authored_factors, list) and authored_factors:
-            fit, factor_detail = score_config_factors(
-                lead, authored_factors, int(f_cfg.get("max", 25))
+        # Authored factors take precedence over the legacy keyword table. In LEGACY mode
+        # they occupy the same axis (`fit.max`) so the 0-100 scale is unchanged; in
+        # OWN-AXIS mode they are additive and `fit` is scored independently.
+        factor_detail: dict[str, float] = {}
+        factors_pts = 0
+        if has_factors:
+            axis_max = (
+                int(f_cfg.get("max", 25)) if legacy_factor_axis else int(factors_max_cfg)
             )
+            factors_pts, factor_detail = score_config_factors(
+                lead, authored_factors, axis_max, today=today
+            )
+        # 🔴 **Never apply the vendored DEFAULT keyword table to a config that authored
+        # its own factors.** That default is the original customer's church-AV vocabulary
+        # (`new construction: 25`, `renovation: 12`), and until own-axis mode existed it
+        # was unreachable for any skill with factors, because factors REPLACED the fit
+        # axis. Own-axis mode made it reachable again: measured on a flooring prospect
+        # whose text says "office renovation", the axis silently awarded **12 points from
+        # a church keyword list**. That is exactly the static-industry coupling the PO
+        # ruled out, reintroduced by a change that looked purely additive.
+        #
+        # A skill that wants a keyword axis alongside its factors authors
+        # `fit.keyword_scores` and gets it. One that does not gets zero rather than
+        # someone else's vertical. A config with NO factors is the legacy shape the
+        # default exists for, and is untouched.
+        if legacy_factor_axis or (has_factors and not (scoring.get("fit") or {}).get("keyword_scores")):
+            fit = 0
         else:
-            fit, factor_detail = score_fit(lead, f_cfg), {}
+            fit = score_fit(lead, f_cfg)
         region = score_region(lead, r_cfg)
         multi = score_multi_source(lead, m_cfg)
         timing = pipeline["score"]
@@ -1417,7 +2007,14 @@ def score_prospects(
         except (TypeError, ValueError):
             ai_adj = 0
 
-        total = max(0, min(cap, completeness + fit + region + multi + timing + ai_adj))
+        total = max(
+            0, min(cap, completeness + fit + factors_pts + region + multi + timing + ai_adj)
+        )
+        # The clamp above is applied AFTER `ai_adj`, deliberately: a base of 95 plus a +15
+        # adjustment must land at `cap`, not above the top band, or the band lookup falls
+        # off the end of the table and the best prospect in the run renders unbanded.
+        if dq_reason:
+            total = 0
 
         # `disqualify_below` — authored by CSB-built skills since day one and read by
         # NOTHING until now. **Implemented as a FLAG, not a filter, deliberately:** the
@@ -1433,6 +2030,11 @@ def score_prospects(
                 disqualified = total < float(floor)
         except (TypeError, ValueError):
             disqualified = None
+        # A hard rule outranks the floor in both directions. It is a statement about
+        # eligibility, not about rank, so it must not be softened by a generous cutoff —
+        # nor must a strict cutoff be reported as though a rule had fired.
+        if dq_reason:
+            disqualified = True
 
         scored.append({
             "prospect_id": p.get("id"),
@@ -1462,7 +2064,20 @@ def score_prospects(
             "sources_found_in": lead.get("sources_found_in", ""),
             "multi_source": lead.get("multi_source", False),
             "score_factors": {
-                "completeness": completeness, "fit": fit, "region_bonus": region,
+                "completeness": completeness,
+                # In LEGACY mode the factor score IS the fit axis, and it is reported
+                # under `fit` exactly as before — existing operators and FE surfaces read
+                # that key, so own-axis mode ADDS `factors_score` rather than moving it.
+                "fit": factors_pts if legacy_factor_axis else fit,
+                # Own-axis mode only. A config with NO authored factors must not gain a
+                # `factors_score: 0` key it never had — that is a shape change to every
+                # existing consumer for no information.
+                **(
+                    {"factors_score": factors_pts}
+                    if has_factors and not legacy_factor_axis
+                    else {}
+                ),
+                "region_bonus": region,
                 "multi_source": multi, "pipeline_timing": timing, "is_region": region > 0,
                 # Per-factor credit for the skill's own authored factors, so an operator
                 # can see WHICH of their criteria a prospect met.
@@ -1470,6 +2085,12 @@ def score_prospects(
             },
             "ai_score_adjustment": ai_adj,
             **({"disqualified": disqualified} if disqualified is not None else {}),
+            **({"disqualifier_reason": dq_reason} if dq_reason else {}),
+            **(
+                {"priority_band": band}
+                if (band := priority_band(round(total), bands))
+                else {}
+            ),
         })
 
     scored.sort(key=lambda x: x["score"], reverse=True)

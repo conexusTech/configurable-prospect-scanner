@@ -1,0 +1,176 @@
+{
+  "_comment": "GENERATED \u2014 do not hand-edit. See tests/generate_wire_fixture.py. The scanner's real wire payload for the eap-parity fixture; aeo-backend validates it against ScanScoredItemDto.",
+  "items": [
+    {
+      "ai_score_adjustment": 0,
+      "contact_name": "",
+      "priority_band": "High",
+      "prospect_id": "7b3c1a62-5342-5ca3-b256-f8439c41a1d5",
+      "rank": 1,
+      "score": 69,
+      "score_factors": {
+        "completeness": 0,
+        "factors": {
+          "decision_maker": 1.0,
+          "in_market_signals": 0.4,
+          "incumbent_status": 0.3,
+          "size_fit": 1.0,
+          "vertical_fit": 0.9
+        },
+        "factors_score": 69,
+        "fit": 0,
+        "is_region": false,
+        "multi_source": 0,
+        "pipeline_timing": 0,
+        "region_bonus": 0
+      }
+    },
+    {
+      "ai_score_adjustment": 0,
+      "contact_name": "",
+      "priority_band": "High",
+      "prospect_id": "d9dbd4ec-415c-5e69-9f03-fd73273db488",
+      "rank": 2,
+      "score": 69,
+      "score_factors": {
+        "completeness": 0,
+        "factors": {
+          "decision_maker": 1.0,
+          "in_market_signals": 0.4,
+          "incumbent_status": 0.3,
+          "size_fit": 0.9,
+          "vertical_fit": 1.0
+        },
+        "factors_score": 69,
+        "fit": 0,
+        "is_region": false,
+        "multi_source": 0,
+        "pipeline_timing": 0,
+        "region_bonus": 0
+      }
+    },
+    {
+      "ai_score_adjustment": 0,
+      "contact_name": "",
+      "priority_band": "High",
+      "prospect_id": "e18cb4c2-6e48-5304-bc2d-4b5922dd8b93",
+      "rank": 3,
+      "score": 63,
+      "score_factors": {
+        "completeness": 0,
+        "factors": {
+          "decision_maker": 1.0,
+          "in_market_signals": 0.4,
+          "incumbent_status": 0.3,
+          "size_fit": 0.9,
+          "vertical_fit": 0.7
+        },
+        "factors_score": 63,
+        "fit": 0,
+        "is_region": false,
+        "multi_source": 0,
+        "pipeline_timing": 0,
+        "region_bonus": 0
+      }
+    },
+    {
+      "ai_score_adjustment": 0,
+      "contact_name": "",
+      "priority_band": "Medium",
+      "prospect_id": "ae3e0c4b-8546-591a-b541-72bc9d69842f",
+      "rank": 4,
+      "score": 59,
+      "score_factors": {
+        "completeness": 0,
+        "factors": {
+          "decision_maker": 1.0,
+          "in_market_signals": 0.4,
+          "incumbent_status": 0.3,
+          "size_fit": 0.9,
+          "vertical_fit": 0.5
+        },
+        "factors_score": 59,
+        "fit": 0,
+        "is_region": false,
+        "multi_source": 0,
+        "pipeline_timing": 0,
+        "region_bonus": 0
+      }
+    },
+    {
+      "ai_score_adjustment": 0,
+      "contact_name": "",
+      "priority_band": "Medium",
+      "prospect_id": "98136efa-5cb8-5c1b-b9f1-c1dd753b6d82",
+      "rank": 5,
+      "score": 59,
+      "score_factors": {
+        "completeness": 0,
+        "factors": {
+          "decision_maker": 1.0,
+          "in_market_signals": 0.0,
+          "incumbent_status": 0.3,
+          "size_fit": 0.9,
+          "vertical_fit": 1.0
+        },
+        "factors_score": 59,
+        "fit": 0,
+        "is_region": false,
+        "multi_source": 0,
+        "pipeline_timing": 0,
+        "region_bonus": 0
+      }
+    },
+    {
+      "ai_score_adjustment": 0,
+      "contact_name": "",
+      "priority_band": "Medium",
+      "prospect_id": "0f3cba7e-e3ad-56db-bce0-f500a3dba333",
+      "rank": 6,
+      "score": 52,
+      "score_factors": {
+        "completeness": 0,
+        "factors": {
+          "decision_maker": 0.0,
+          "in_market_signals": 0.4,
+          "incumbent_status": 0.4,
+          "size_fit": 0.9,
+          "vertical_fit": 0.8
+        },
+        "factors_score": 52,
+        "fit": 0,
+        "is_region": false,
+        "multi_source": 0,
+        "pipeline_timing": 0,
+        "region_bonus": 0
+      }
+    },
+    {
+      "ai_score_adjustment": 0,
+      "contact_name": "",
+      "disqualified": true,
+      "disqualifier_reason": "Standalone EAP contract awarded within ~18 months (standalone-recent)",
+      "priority_band": "Skip",
+      "prospect_id": "0677f90e-45cf-5d66-bad6-6d48280d4482",
+      "rank": 7,
+      "score": 0,
+      "score_factors": {
+        "completeness": 0,
+        "factors": {
+          "decision_maker": 0.0,
+          "in_market_signals": 0.0,
+          "incumbent_status": 0.0,
+          "size_fit": 0.5,
+          "vertical_fit": 1.0
+        },
+        "factors_score": 30,
+        "fit": 0,
+        "is_region": false,
+        "multi_source": 0,
+        "pipeline_timing": 0,
+        "region_bonus": 0
+      }
+    }
+  ],
+  "scan_date": "2026-07-20"
+}

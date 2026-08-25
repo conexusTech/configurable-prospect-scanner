@@ -547,3 +547,64 @@ class TestShapeMatchedFieldsMustLookLikeDates:
         assert "dated March 2026" in self._lines(
             {"event_date": "March 2026"}, ["event_date"]
         )
+
+
+class TestTheReasoningInstruction:
+    """The `ai_analysis` prose contract, asked for by the PO via aeo-frontend.
+
+    Thread: `aeo-triage/prospect-pipeline-stage.md`. The panel's Overview tab no longer
+    has a "Why this stage" heading, so this sentence is now the **opening paragraph a
+    salesperson reads about the company** — unlabelled. Measured before the change: 84
+    rows, 123–209 characters, average 159, i.e. one or two sentences citing a single
+    signal.
+
+    Pinned as assertions because a prompt is a string: every test in this file passed
+    unchanged when the instruction was added, so nothing here would have noticed it being
+    dropped again.
+    """
+
+    def _prompt(self) -> str:
+        from aeo.phases import ai_judgment
+
+        return ai_judgment._PROMPT
+
+    def test_asks_for_three_or_four_sentences(self):
+        assert "Three or four sentences" in self._prompt()
+
+    def test_forbids_opening_on_the_models_own_procedure(self):
+        # The PO's actual complaint: "the beginning ... says the agent read this
+        # prospect's dated event and what kind of events it was and picked the stage. We
+        # can get rid of that." Half of that was frontend copy; this is our half.
+        p = self._prompt()
+        assert "Open on the evidence" in p
+        assert "Never open on your own procedure" in p
+
+    def test_carries_the_UI_length_ceiling_and_says_why(self):
+        # A soft ceiling, and the reason matters: past it the panel pushes the company's
+        # address and contact below the fold on the tab where a salesperson looks for
+        # them. Without the reason a future editor drops it as an arbitrary number.
+        p = self._prompt()
+        assert "700 characters" in p
+        assert "address" in p and "contact" in p
+
+    def test_keeps_the_field_scoped_to_STAGE_reasoning(self):
+        # 🔴 Load-bearing. `ai_analysis` SURVIVES an operator move — the gateway rewrites
+        # status and source and leaves the prose — so on a dragged prospect it argues for
+        # the rung the prospect just left. aeo-frontend renders it only while
+        # `pipeline_status_source === 'ai'` for exactly that reason. A longer, more
+        # confident paragraph makes that worse if anything ever renders it
+        # unconditionally, so the field must not drift into a general company summary.
+        p = self._prompt()
+        assert "Stay stage reasoning" in p
+        assert "not a general summary" in p
+
+    def test_asks_it_to_name_real_fields_and_not_invent_them(self):
+        # ⚠️ The judge's payload holds ONLY id, company, industry, address/city/state and
+        # dated events with their types (`_prospect_lines`). It does NOT see firm type,
+        # related property owner, validation signals or score axes. Asking for "all the
+        # data points" without this guard would buy fabrication rather than detail.
+        p = self._prompt()
+        assert "Do not list a field you were not given" in p
+
+    def test_still_asks_for_the_timing_implication(self):
+        assert "means for TIMING" in self._prompt()

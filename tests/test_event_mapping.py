@@ -297,7 +297,19 @@ class TestWhitelistParity:
         "fields": "AEO holds the authored fields in discovery_data",
         "sources_found_in": "AEO holds it on the prospect row",
         "multi_source": "derivable from sources_found_in",
-        "disqualified": "carried on the validations event, not scoring",
+        # 🔴 REMOVED 2026-08-24. This entry read `"disqualified": "carried on the
+        # validations event, not scoring"` and that justification was FALSE:
+        # `disqualified` is produced by `score_prospects`, on the scoring path, from
+        # `scoring.disqualify_below`. So the guard built to catch exactly this omission
+        # was disarmed by a wrong comment — and the omission then shipped, with all three
+        # production skills authoring `disqualify_below: 40` and the flag dropped one line
+        # before the wire on every real run.
+        #
+        # Worse, the entry was never even exercised: the fixture below authors no
+        # `disqualify_below`, so `disqualified` was absent from `produced` and the
+        # exclusion did nothing. An untested exclusion is a comment, not a guard.
+        # `disqualified`, `disqualifier_reason` and `priority_band` are now whitelisted,
+        # and `test_disqualification_and_band_reach_the_wire` exercises them.
         # NOT an omission: `pipeline_status` rides inside `scoring_payload`, which is
         # the DESIGNED channel (corrected 2026-08-04 after a live run -- an earlier
         # version of event_mapping.py called it a name collision and warned against

@@ -115,6 +115,23 @@ The month ranges on the stages are GUIDANCE for ordering them, not a formula. Do
 compute months and look up a row; reason about when this seller's work would actually \
 happen.
 
+HOW TO WRITE THE REASONING
+It is the FIRST thing a salesperson reads about this company — there is no heading above \
+it and no label saying an agent wrote it. So write about the business, not about \
+yourself.
+
+- Three or four sentences.
+- Open on the evidence. Never open on your own procedure: "A building permit issued in \
+February means construction is underway" — not "The dated event was examined and…".
+- Name the data points you actually used and their values: the event and its date, the \
+industry, the location when it mattered. Do not list a field you were not given, and do \
+not invent one to sound thorough.
+- Say what it means for TIMING. The stage is the point of the paragraph, so end where the \
+buying decision falls relative to today.
+- Keep it under about 700 characters. Past that it pushes the company's address and \
+contact out of view.
+- Stay stage reasoning. This is not a general summary of the company.
+
 ALSO RATE THE FIT
 Give a score adjustment from {adj_min} to {adj_max}. Positive when this prospect is a \
 better fit for what the seller sells than its raw data suggests; negative when worse. \
@@ -125,7 +142,9 @@ THE PROSPECTS
 
 Return ONLY a JSON array, one object per prospect, no other text:
 [{{"id": "<the id given>", "stage": "<exact stage key from the list>", \
-"reasoning": "<one or two sentences: which event, what it implies, why this stage>", \
+"reasoning": "<three or four sentences per HOW TO WRITE THE REASONING above: the event \
+and its date, the industry and location where they mattered, what it implies, and when \
+the buying decision falls>", \
 "adjustment": <number>, \
 "event": "<the ONE event you based the stage on, in plain words a salesperson would \
 read — 'Started leasing', 'Building permit issued', 'Acquired the property'. Empty \
