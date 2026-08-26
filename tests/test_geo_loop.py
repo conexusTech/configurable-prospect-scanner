@@ -123,6 +123,56 @@ class TestLoop:
         assert [p["id"] for p in in_area] == ["2"]
         assert [r["prospect_id"] for r in rejects] == ["1"]
 
+    def test_the_forwarded_set_is_in_area_PLUS_rejects_not_in_area_alone(self):
+        """The invariant `runner.total_discovered` reports against.
+
+        Every prospect a round yields has already been FORWARDED to AEO by
+        `capped_discover` before this loop classifies it, and AEO writes
+        `ON CONFLICT ("id") DO NOTHING` — so a row is permanent the moment it is
+        emitted, whatever this loop later decides about its address.
+
+        `in_area` alone therefore under-reports what was persisted, by exactly the
+        reject count. aeo-frontend measured that from the far side of the wire: rows
+        EXCEEDING `total_prospects` on 2 of 8 completed production runs (+5, +12).
+
+        Asserted as the PARTITION rather than as "the counter is 3", so the test
+        still means something if the fixture changes: whatever a round forwards must
+        come back out split across the two lists and lost from neither.
+        """
+        forwarded: list[dict] = []
+
+        def discover(ctx):
+            found = [
+                _p("1", "Austin Co", city="Austin", state="TX"),
+                _p("2", "Dallas Co", city="Dallas", state="TX"),
+                _p("3", "Houston Co", city="Houston", state="TX"),
+            ]
+            # Stand-in for capped_discover, which emits before this loop runs.
+            forwarded.extend(found)
+            return found
+
+        in_area, rejects = discover_in_area(
+            tool_context={"sources": {"s": {}}}, area=AREA, target_count=1,
+            discover=discover,
+            provider=_verifier({
+                "Dallas Co": {"city": "Dallas", "state": "TX"},
+                "Houston Co": {"city": "Houston", "state": "TX"},
+            }),
+            provider_config={}, parse_json_array=_parse,
+        )
+
+        # The partition holds: nothing forwarded is lost from both lists.
+        assert len(in_area) + len(rejects) == len(forwarded)
+        assert {p["id"] for p in in_area} | {r["prospect_id"] for r in rejects} == {
+            p["id"] for p in forwarded
+        }
+
+        # And the half the counter used to use does NOT hold — stated explicitly so
+        # the fixture can never drift into one where both formulas agree and the
+        # test passes without exercising the defect at all.
+        assert rejects, "fixture must produce at least one reject or this proves nothing"
+        assert len(in_area) != len(forwarded)
+
     def test_a_round_that_finds_nothing_new_ends_the_loop(self):
         # An exhausted search must not be retried into a bill.
         calls = []

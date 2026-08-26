@@ -767,14 +767,42 @@ def main() -> int:
                     f"outside {area.describe()}"
                 )
 
-        # How many prospects DISCOVERY produced, captured before validation filters
-        # `prospects` down to survivors. Reported as `total_prospects` because that is
-        # what the `prospects` table holds — every discovered row persists, judged or
-        # not. Without this the summary counted survivors, so a run wrote 33 rows and
-        # reported 14, duplicating `total_scored` and leaving the discovered count
-        # reported nowhere. aeo-frontend saw the mismatch first and asked whether it was
-        # "a cap, a filter, or an incomplete pass" — it was none of those, it was this.
-        total_discovered = len(prospects)
+        # Every prospect this run FORWARDED to AEO: the in-area survivors PLUS the
+        # geo-rejected. Both were emitted, so both persist.
+        #
+        # Captured HERE, before validation filters `prospects` down to survivors, because
+        # the summary otherwise counted survivors: a run wrote 33 rows and reported 14,
+        # duplicating `total_scored` and leaving the discovered count reported nowhere.
+        # aeo-frontend saw that mismatch first and asked whether it was "a cap, a filter,
+        # or an incomplete pass". It was none of those. They then measured the SECOND
+        # mismatch below, which is what this line now fixes.
+        #
+        # 🔴 This was `len(prospects)` alone until 2026-08-26, and that silently dropped
+        # the geo-rejects. `discover_in_area` returns `(in_area, rejections)`, and an
+        # out-of-area prospect is appended to `rejections` and NEVER to `in_area` — but
+        # `capped_discover` forwarded it rounds earlier, and AEO writes prospects
+        # `ON CONFLICT ("id") DO NOTHING`, so that row is permanent and un-retractable.
+        # The counter therefore under-reported by exactly the geo-reject count, and
+        # aeo-frontend measured the consequence from the other side: rows EXCEEDING
+        # `total_prospects` on 2 of 8 completed production runs (+5, +12, all distinct
+        # companies — they were real prospects, just out-of-area ones).
+        #
+        # ⚠️ This still does NOT equal `SELECT count(*) FROM prospects` for the run, and
+        # no scanner-side number can. The gateway applies its own cross-run de-duplication
+        # at insert (`runtime-scan-events.service.ts`) and skips companies the org already
+        # holds, which is why the same measurement also found runs with FEWER rows than
+        # this counter. The two adjustments sit on opposite sides of the wire:
+        #
+        #     forwarded        = in_area + geo_rejects        <- this number
+        #     rows persisted   = forwarded - gateway_skipped
+        #
+        # So `rows - total_prospects == geo_rejects - gateway_skipped`, which is why it
+        # went both directions and why neither repo's docblock could be right: ours said
+        # "every discovered row persists" (held on 1 of 8) and AEO's said "before
+        # validation filtered the set" (violated on 2 of 8). What this counts is what we
+        # SENT. Only the gateway can report what it stored, because only it knows what it
+        # dropped — and it already logs that skip count per callback.
+        total_discovered = len(prospects) + len(geo_rejects)
 
         # `geo_rejects` is already populated by the verify loop above — rejections
         # there carry a VERIFIED address, which is strictly better evidence than the
