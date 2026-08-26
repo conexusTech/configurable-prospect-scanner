@@ -157,8 +157,33 @@ def post_event(
     ).encode()
     headers = {"Content-Type": "application/json", **_auth_headers()}
     req = urlrequest.Request(url, data=body, headers=headers, method="POST")
-    with urlrequest.urlopen(req, timeout=30) as resp:
-        resp.read()
+    try:
+        with urlrequest.urlopen(req, timeout=30) as resp:
+            resp.read()
+    except HTTPError as exc:
+        # An HTTPError IS the response, and AEO puts the field-level reason in its body:
+        # `validateEvent` raises `{message, details:[...]}` naming exactly which property
+        # failed. Not reading it turned a precise validation error into a bare
+        # "HTTP Error 400: Bad Request".
+        #
+        # Measured 2026-08-26: a real run discovered 49 prospects, kept 15, and died on the
+        # prospects callback. Neither the pod log nor the gateway log named the field --
+        # the gateway logs the exception MESSAGE and the details ride only in the response
+        # body, which was here and discarded. Diagnosing it meant reading two DTOs.
+        #
+        # Logged and re-raised UNCHANGED: callers catch HTTPError specifically
+        # (`except (HTTPError, URLError, ValueError)`), so converting the type here would
+        # route the failure somewhere else while pretending to improve reporting.
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:800]
+        except Exception:  # noqa: BLE001 -- diagnostics must never mask the error
+            pass
+        _log(
+            f"callback rejected: {event_type} -> HTTP {exc.code} {exc.reason}"
+            + (f" :: {detail}" if detail else " :: (empty body)")
+        )
+        raise
 
 
 class AeoEventSink(als.Sink):
