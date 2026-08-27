@@ -265,28 +265,38 @@ def map_event(event: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     if etype == "zip_codes":
         return [("zip_codes", p) for p in map_zip_codes_event(event)]
     if etype == "completed":
-        # Only the four counters AEO's ScanCompletedSummaryDto declares. Anything
-        # else (e.g. the engine's provider name) is dropped rather than sent: the
-        # global ValidationPipe whitelists, and relying on it to strip an extra key
+        # The four counters AEO's ScanCompletedSummaryDto declares, plus `cost`.
+        # Anything else (e.g. the engine's provider name) is dropped rather than sent:
+        # the global ValidationPipe whitelists, and relying on it to strip an extra key
         # makes the payload depend on a pipe setting rather than on this contract.
         summary = event.get("summary") or {}
-        return [
-            (
-                "completed",
-                {
-                    "summary": {
-                        k: summary[k]
-                        for k in (
-                            "total_zips",
-                            "total_prospects",
-                            "total_validated",
-                            "total_scored",
-                        )
-                        if isinstance(summary.get(k), (int, float))
-                    }
-                },
+        out: dict[str, Any] = {
+            k: summary[k]
+            for k in (
+                "total_zips",
+                "total_prospects",
+                "total_validated",
+                "total_scored",
             )
-        ]
+            if isinstance(summary.get(k), (int, float))
+        }
+
+        # ⚠️ `cost` needs its OWN line and cannot join the tuple above: it is a nested
+        # UNITS object, so the numeric guard would drop it even once whitelisted. That
+        # pair — an allowlist that omits the key AND a type guard that would reject it —
+        # is why the meter shipped fully tested and still reported nothing: 7ecc9ce added
+        # the meter, every phase call site, the emission in runner.py and 514 lines of
+        # tests, and never touched this file. `scan_runs.cost_breakdown` was NULL on the
+        # first run of the new build while all four counters wrote fine.
+        #
+        # Omitted entirely when the meter has nothing, so a gateway that predates the
+        # `cost` field on the DTO is unaffected (an UNDECLARED key is a 400, not a
+        # silent drop — `forbidNonWhitelisted` is on).
+        cost = summary.get("cost")
+        if isinstance(cost, dict) and cost:
+            out["cost"] = cost
+
+        return [("completed", {"summary": out})]
     if etype == "error":
         return [("error", {"message": event.get("message", "")})]
     return []

@@ -178,6 +178,46 @@ class TestCompletedSummary:
         out = map_event({"type": "completed", "summary": {"total_prospects": "three"}})
         assert out == [("completed", {"summary": {}})]
 
+    def test_forwards_the_cost_meter_snapshot(self):
+        """🔑 The assertion that was missing, and the whole reason the meter shipped mute.
+
+        `7ecc9ce` added the meter, its call site in all six phases, the emission in
+        `runner.py` and 514 lines of tests — and never touched this file. So the first
+        production run of the new build (e9b5c7f5) wrote all four counters correctly and
+        left `scan_runs.actual_cost` and `cost_breakdown` NULL. Every one of those 514
+        lines asserted the meter's OWN state; none asserted the payload that actually
+        leaves the process.
+        """
+        cost = {
+            "calls": 367,
+            "grounded_requests": 322,
+            "grounded_search_queries": 340,
+            "by_phase": [{"phase": "geography", "calls": 96}],
+            "search_histogram": {"0": 28, "1": 294},
+        }
+        out = map_event(
+            {"type": "completed", "summary": {"total_prospects": 96, "cost": cost}}
+        )
+        assert out == [("completed", {"summary": {"total_prospects": 96, "cost": cost}})]
+
+    def test_cost_survives_the_guard_the_counters_need(self):
+        """The half of the bug an allowlist fix alone would NOT have caught: `cost` is a
+        dict, so adding it to the counter tuple would still have dropped it on
+        `isinstance(..., (int, float))`. Two defects, one symptom."""
+        out = map_event({"type": "completed", "summary": {"cost": {"calls": 1}}})
+        assert out[0][1]["summary"]["cost"] == {"calls": 1}
+
+    def test_omits_cost_entirely_rather_than_sending_an_empty_one(self):
+        """An empty dict is NOT the same as absent downstream. The gateway writes
+        `s.cost ? JSON.stringify(s.cost) : null`, and `{}` is truthy in JS — so an empty
+        cost persists as `{}` and prices to a confident $0.00, which reads as "measured,
+        and it was free" instead of "unmeasured". Absent keeps the column NULL."""
+        for empty in ({}, None, "not-a-dict", 0, []):
+            out = map_event(
+                {"type": "completed", "summary": {"total_scored": 1, "cost": empty}}
+            )
+            assert out == [("completed", {"summary": {"total_scored": 1}})], empty
+
 
 class TestBatching:
     def test_splits_above_the_aeo_item_cap(self):

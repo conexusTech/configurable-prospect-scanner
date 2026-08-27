@@ -156,6 +156,41 @@ class TestLocalityParsing:
         for junk in ("Somewhere vague", "", None, "12 Rue de Rivoli, Paris, France"):
             assert als._parse_locality(junk) == (None, None, None), junk
 
+    # Verbatim from MYgroup run e9b5c7f5 — the shape that stored 96 NULL localities.
+    BARE = [
+        ("Charlotte, NC", ("Charlotte", "NC", None)),
+        ("Durham, NC", ("Durham", "NC", None)),
+        ("Winston-Salem, NC", ("Winston-Salem", "NC", None)),
+        ("Troutman, NC", ("Troutman", "NC", None)),
+    ]
+
+    def test_parses_a_bare_locality_with_no_street_address(self):
+        """🔑 The locality is not always a TAIL.
+
+        On run e9b5c7f5 every discovered `location` was "City, ST" with no leading comma,
+        so all 96 prospects stored NULL city/state/zip, `region_bonus` scored 0 on every
+        one of the 45 scored prospects, and the operator's location columns were empty in
+        both the UI and the CSV export. The geo-fence worked throughout off its own
+        verified address, so nothing looked broken.
+        """
+        for address, expected in self.BARE:
+            assert als._parse_locality(address) == expected, address
+
+    def test_the_street_number_never_wins_the_city_group(self):
+        """What the optional leading comma must not break: with `(?:^|,)` the `^` branch
+        tries city="123 Main St" first, and only the anchored `$` rejects it."""
+        assert als._parse_locality("123 Main St, Troutman, NC 28166") == (
+            "Troutman",
+            "NC",
+            "28166",
+        )
+
+    def test_a_spelled_out_state_is_still_left_alone(self):
+        """What keeps the optional comma honest. Without `$` doing the real work this
+        would mangle "Charlotte, North Carolina" into city="Charlotte", state="No" — and a
+        wrong state mis-routes the lead to another sales territory."""
+        assert als._parse_locality("Charlotte, North Carolina") == (None, None, None)
+
 
 class TestCollectedFieldsReachTheirColumns:
     def test_passthrough_carries_industry_and_zip(self):

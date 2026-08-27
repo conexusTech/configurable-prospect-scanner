@@ -1301,8 +1301,21 @@ def _assemble_prospects(*, groups: dict[str, list[dict[str, Any]]], scan_run_id:
 #: narrow: it fills a gap, it does not guess. Anything that does not match this exact
 #: tail is left as None, because a wrong city silently mis-scores region and mis-routes
 #: a lead to the wrong sales territory, which is worse than an empty field.
+#:
+#: ⚠️ **The leading comma is OPTIONAL — `(?:^|,)` — because the locality is not always a
+#: TAIL.** Two source shapes are both common: a full street address
+#: ("123 Main St, Troutman, NC 28166") and a bare locality ("Charlotte, NC"). Requiring
+#: the comma matched only the first, so on a run whose every discovered `location` was
+#: "City, ST" all 96 prospects stored NULL city/state/zip. That zeroed `region_bonus` for
+#: every one of them (it reads city/state) and left the operator's location columns empty
+#: in the UI and the CSV export — while the geo-fence worked fine off its own verified
+#: address, so nothing looked broken.
+#:
+#: The anchored `$` still does the real work of not guessing: it is what keeps
+#: "Charlotte, North Carolina" unparsed rather than mangled into city="Charlotte",
+#: state="No".
 _LOCALITY_TAIL = re.compile(
-    r",\s*(?P<city>[^,]{2,40}),\s*(?P<state>[A-Za-z]{2})\.?\s*(?P<zip>\d{5}(?:-\d{4})?)?\s*$"
+    r"(?:^|,)\s*(?P<city>[^,]{2,40}),\s*(?P<state>[A-Za-z]{2})\.?\s*(?P<zip>\d{5}(?:-\d{4})?)?\s*$"
 )
 
 
