@@ -138,6 +138,7 @@ def validate_prospects(
             # 1 attempt, not the config value — see PHASE_RETRY_ATTEMPTS.
             retry_attempts=PHASE_RETRY_ATTEMPTS,
             timeout_s=DEFAULT_CALL_TIMEOUT_S,
+            phase="validation",
         )
         parsed = parse_json_array(raw)
         return parsed[0] if parsed else {}

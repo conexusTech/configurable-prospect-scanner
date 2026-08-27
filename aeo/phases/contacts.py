@@ -143,6 +143,7 @@ def find_contacts(
             # 1 attempt, not the config value — see PHASE_RETRY_ATTEMPTS.
             retry_attempts=PHASE_RETRY_ATTEMPTS,
             timeout_s=DEFAULT_CALL_TIMEOUT_S,
+            phase="contacts",
         )
         parsed = parse_json_array(raw)
         return parsed[0] if parsed else {}

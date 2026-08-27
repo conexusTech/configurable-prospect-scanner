@@ -608,3 +608,59 @@ class TestTheReasoningInstruction:
 
     def test_still_asks_for_the_timing_implication(self):
         assert "means for TIMING" in self._prompt()
+
+
+# ── billing: this phase must not pay the grounded-search meter ───────────────
+
+
+def _kwarg_recording_provider(payload):
+    """A provider that records the KEYWORDS it was called with, not just the prompt.
+
+    `responder` above swallows them into `**_kw`, which is fine for prompt assertions
+    and useless here: the thing under test IS a keyword. A double that discards the
+    argument cannot test the argument.
+    """
+    calls: list[dict] = []
+
+    def provider(promptext, **kw):
+        calls.append(kw)
+        return json.dumps(payload)
+
+    provider.calls = calls  # type: ignore[attr-defined]
+    return provider
+
+
+def test_judgment_calls_the_provider_ungrounded():
+    """🔑 The regression that cost ~$800.
+
+    `gemini_provider` attached the Google Search tool unconditionally, so every
+    judgment call was a billed grounded search request on the pro model — one per
+    prospect — for a phase that asks the model for no external research. The module
+    docstring had asserted these calls were ungrounded for the phase's whole life.
+
+    Asserted on the wire rather than on the docstring, because a comment cannot fail.
+    """
+    provider = _kwarg_recording_provider(
+        [{"id": "p1", "stage": "3 - Evaluating", "reasoning": "r"}]
+    )
+    run([prospect("p1")], provider)
+
+    assert provider.calls, "the phase never called the provider"
+    for kw in provider.calls:
+        assert kw.get("grounded") is False, (
+            "judgment must pass grounded=False — dropping it silently restores a "
+            "billed search request per prospect on the most expensive model"
+        )
+
+
+def test_judgment_tags_its_calls_for_cost_attribution():
+    """Per-phase cost reporting is only real if each phase names itself.
+
+    Without this the whole judgment spend lands in the meter's `unknown` bucket, and
+    the estimate-vs-actual report FE renders cannot show where money went.
+    """
+    provider = _kwarg_recording_provider(
+        [{"id": "p1", "stage": "3 - Evaluating", "reasoning": "r"}]
+    )
+    run([prospect("p1")], provider)
+    assert {kw.get("phase") for kw in provider.calls} == {"judgment"}

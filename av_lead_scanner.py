@@ -148,7 +148,8 @@ def normalize_name(name: str) -> str:
 #
 # The tool talks to exactly one provider function with this signature:
 #
-#     search(prompt: str, *, model, temperature, retry_attempts, timeout_s) -> str
+#     search(prompt: str, *, model, temperature, retry_attempts, timeout_s,
+#            grounded=True, phase="unknown") -> str
 #
 # returning the model's raw text (the tool parses the JSON array out). This
 # thin seam is what makes the discovery path swappable/mockable: two real
@@ -156,12 +157,449 @@ def normalize_name(name: str) -> str:
 # with the web-search tool), `--mock` substitutes a deterministic offline
 # generator, and tests monkeypatch it directly. Adding another provider is a
 # new function of this signature plus one registry entry — no other change.
+#
+# ⚠️ **`grounded` is a BILLING control, not a quality knob, and it defaults True
+# because every retrieval phase needs it.** Grounding is metered SEPARATELY from
+# tokens and it is the expensive meter: 5,000 free search queries/month across the
+# Gemini 3.x family, then $14 per 1,000 — billed **per search query, and one request
+# may fire several**. A phase that reasons only over data already collected must pass
+# `grounded=False`, or it pays the retrieval price for retrieval it never does.
+#
+# 🔑 This parameter exists because the claim was already written down, and was false.
+# `aeo/phases/ai_judgment.py` stated "these calls are ungrounded, so far lighter than
+# the grounded validation calls" and partly justified `DEFAULT_BATCH_SIZE = 1` on it —
+# while this provider attached the search tool unconditionally, with no opt-out. Every
+# judgment call was a billed search request on the *pro* model, one per prospect, for a
+# phase that asks the model for no external research at all. The comment described the
+# design; nothing implemented it, and the gap survived until an $800 invoice found it.
+#
+# Threaded as a parameter rather than special-cased on a phase name inside the provider,
+# so the next ungrounded phase is one keyword and not a re-litigation.
 
 SearchProvider = Callable[..., str]
 
 _gemini_client: Any = None
 _claude_client: Any = None
 _client_lock = threading.Lock()  # guards lazy client construction under concurrency
+
+
+class ScanAbort(RuntimeError):
+    """A failure the run cannot recover from — it must terminate as `failed`.
+
+    🔑 **The whole point is `reason`.** `scan_runs.error` is free text, and free text is
+    why the 2026-08-26 outage was invisible: a quota failure and an empty market both
+    rendered as "0 prospects". Every subclass carries a stable machine-readable code,
+    the runner prefixes it onto the emitted message, and consumers match on the prefix
+    rather than parsing prose that will be reworded.
+    """
+
+    reason = "scan_aborted"
+
+
+class ProviderQuotaExhausted(ScanAbort):
+    """The provider's allowance is gone — every further call this run will fail too.
+
+    Distinct from a generic call failure because the two need opposite handling. One
+    bad query must not kill its source (a malformed response, a timeout, a single
+    refusal); a dead quota must not be retried at all. Before this existed the two
+    looked identical, so a quota outage was retried three times per query across an
+    entire fanned-out sweep.
+    """
+
+    reason = "provider_quota_exhausted"
+
+
+class DiscoveryFailureRateExceeded(ScanAbort):
+    """Too large a share of discovery queries failed for the result to mean anything.
+
+    Separate from the quota case because the cause is unknown — malformed responses,
+    timeouts, a provider degradation we have no vocabulary for. What they share is that
+    the surviving results are no longer a measurement of the customer's market, and
+    reporting them as one is the defect this exists to prevent.
+    """
+
+    reason = "discovery_failure_rate_exceeded"
+
+
+class _QuotaBreaker:
+    """Trips once the provider answers with exhaustion repeatedly, and stays tripped.
+
+    ⚠️ **Process-wide rather than per-call, and that is the fix.** Retry state used to
+    live inside one provider invocation, so every query rediscovered the outage on its
+    own: three attempts each, sleeping 15s then 30s, across the whole sweep. Measured on
+    the 2026-08-26 incident — a single run logged **357 quota errors over ~16 minutes**
+    of retries that could not possibly succeed, and still reported success at the end.
+
+    **Sticky on purpose.** A monthly grounding allowance does not come back mid-run, so
+    un-tripping would only re-enter the storm. `note_success` clears the *consecutive*
+    counter — so isolated 429s spread across a long healthy run never accumulate into a
+    trip — but it cannot un-trip: crossing the threshold is a statement about the
+    account, not about one call.
+    """
+
+    def __init__(self, threshold: int) -> None:
+        self._lock = threading.Lock()
+        self._threshold = max(1, threshold)
+        self._consecutive = 0
+        self._tripped = False
+        self._total = 0
+
+    @property
+    def tripped(self) -> bool:
+        with self._lock:
+            return self._tripped
+
+    @property
+    def total_quota_errors(self) -> int:
+        with self._lock:
+            return self._total
+
+    def raise_if_tripped(self, provider: str) -> None:
+        with self._lock:
+            if not self._tripped:
+                return
+            total = self._total
+        raise ProviderQuotaExhausted(
+            f"{provider} quota exhausted — {total} quota error(s) seen this run; "
+            f"failing fast without calling the API"
+        )
+
+    def note_success(self) -> None:
+        with self._lock:
+            self._consecutive = 0
+
+    def note_quota_error(self) -> bool:
+        """Record a quota error. Returns True if THIS one tripped the breaker."""
+        with self._lock:
+            self._total += 1
+            self._consecutive += 1
+            if self._tripped or self._consecutive < self._threshold:
+                return False
+            self._tripped = True
+            return True
+
+    def reset(self) -> None:
+        with self._lock:
+            self._consecutive = 0
+            self._tripped = False
+            self._total = 0
+
+
+#: Consecutive quota errors that trip the breaker. 3 rather than 1 because a lone 429 is
+#: also how ordinary per-minute throttling presents, and that one IS worth waiting out;
+#: three in a row is an allowance, not a burst.
+QUOTA_TRIP_THRESHOLD = int(os.environ.get("SCANNER_QUOTA_TRIP_THRESHOLD", "3") or 3)
+
+_quota_breaker = _QuotaBreaker(QUOTA_TRIP_THRESHOLD)
+
+#: Share of discovery queries that may fail before the sweep is abandoned and the run
+#: terminates as `failed`.
+#:
+#: ⚠️ **Checked while the sweep is still running, not tallied at the end** — that is the
+#: entire reason the number is this low. A threshold evaluated after the fan-out has
+#: drained tells you the run was worthless *after* you have paid for all of it; the
+#: 2026-08-26 incident spent 16 minutes and a full query set to learn nothing.
+DISCOVERY_FAILURE_ABORT_RATE = float(
+    os.environ.get("SCANNER_DISCOVERY_FAILURE_ABORT_RATE", "0.10") or 0.10
+)
+
+#: Absolute floor beneath the rate above, and it is load-bearing on small query sets.
+#:
+#: At a 10% rate a 7-query sweep — MYgroup's actual shape — would abort on its FIRST
+#: failure (1/7 = 14%), which would turn one transient malformed response into a failed
+#: customer run and undo `_run_query`'s deliberate "one bad query mustn't kill the
+#: source" tolerance. Requiring two failures keeps that tolerance for genuine one-offs
+#: while still catching a 60-query sweep at query 6 or 7 instead of query 60.
+#:
+#: A systemic quota failure does not consult either number — the breaker raises through
+#: this path immediately, because it already knows every remaining call will fail.
+DISCOVERY_FAILURE_ABORT_MIN = int(
+    os.environ.get("SCANNER_DISCOVERY_FAILURE_ABORT_MIN", "2") or 2
+)
+
+
+#: Markers that the limit is a SHORT WINDOW — it clears by waiting, so the run must not
+#: be aborted. Tested before the allowance markers, so a throttle wins the tie however
+#: it happens to be worded.
+#:
+#: ⚠️ **A per-DAY cap does not belong here**, and adding it was my first mistake at this:
+#: Gemini's allowance body reads `limit 'Grounding requests per day'`, so a `per day`
+#: marker classifies the real exhaustion case as transient. The test for the daily body
+#: caught it immediately. The distinction is not "is there a window" but "can a running
+#: scan outlast it" — seconds yes, a day no.
+_SHORT_WINDOW_MARKERS = (
+    "per minute",
+    "per second",
+    "per-minute",
+    "/min",
+    "retry in",
+    "rate limit",
+    "too many requests",
+)
+
+#: Markers that the ALLOWANCE itself is gone. Only consulted once the short-window
+#: markers are ruled out.
+_ALLOWANCE_MARKERS = (
+    "quota",
+    "exceeded your current",
+    "check your plan",
+    "billing",
+    "insufficient_quota",
+)
+
+
+def _is_short_window_throttle(msg: str) -> bool:
+    """Whether the limit clears by waiting — a per-minute/second cap, not an allowance.
+
+    🔴 **Gemini overloads `RESOURCE_EXHAUSTED` for BOTH cases, and both mention `quota`.**
+    Reported by aeo-agent-service after they adopted the predicate below:
+
+        429 RESOURCE_EXHAUSTED  "Quota exceeded for quota metric 'Grounding requests'
+                                 and limit 'Grounding requests per day'"   <- allowance
+        429 RESOURCE_EXHAUSTED  "Quota exceeded for quota metric 'Generate Content API
+                                 requests' and limit 'requests per minute'" <- slow down
+
+    So a bare `resource_exhausted` — or even `429` + `quota` — cannot discriminate, and
+    the earlier version of `_is_quota_error` returned True for both. On the scanner that
+    is the worse direction: at `SCANNER_PHASE_CONCURRENCY=8`, three consecutive
+    per-minute 429s are ordinary, and they would have tripped the breaker and terminated
+    a **healthy** run as `provider_quota_exhausted`.
+
+    The negative tests missed it because they pinned OpenAI's throttle shape
+    (`429 Too Many Requests: rate limit exceeded, retry in 12s`) — and it is Gemini that
+    holds the scarce meter.
+    """
+    m = msg.lower()
+    return any(k in m for k in _SHORT_WINDOW_MARKERS)
+
+
+def _is_quota_error(msg: str) -> bool:
+    """Whether a provider error message means the allowance is gone.
+
+    **Window scope first, allowance second** (agent-service's ordering, adopted). A
+    short-window marker returns False even when the body also says `quota`, because
+    Gemini's throttle says both.
+
+    ⚠️ **Deliberately biased toward transient.** An ambiguous or unreadable body returns
+    False: a false positive aborts a run that would have succeeded, while a false
+    negative is only the behaviour that shipped before any of this existed. The terminal
+    class widens strictly on evidence.
+    """
+    m = msg.lower()
+    if _is_short_window_throttle(m):
+        return False
+    if "resource_exhausted" in m:
+        return True
+    return "429" in m and any(k in m for k in _ALLOWANCE_MARKERS)
+
+
+class _CostMeter:
+    """Per-run tally of what the provider actually billed us for.
+
+    ⚠️ **Counts units, never money.** The price table lives gateway-side, in
+    `prospect-cost.constants.ts` mirroring `sov.constants.ts`, and is env-overridable
+    there. Keeping the arithmetic out of the scanner means a price correction — or
+    calibrating the searches-per-request multiplier once there is finally data to
+    calibrate it against — is a config change on one deploy, and every historical run
+    can be re-priced from its stored counters instead of being permanently wrong.
+
+    🔑 **`grounded_search_queries` is the billed unit, and it is NOT the request count.**
+    Grounding bills per *search query*, and one grounded request may fire several.
+    `len(grounding_metadata.web_search_queries)` is the only place that ratio is
+    observable, and throwing it away is precisely why an $800 invoice could not be
+    attributed to anything. Recording it is the reason this class exists.
+    """
+
+    _FIELDS = (
+        "calls",
+        "grounded_requests",
+        "grounded_search_queries",
+        "input_tokens",
+        "output_tokens",
+        "thinking_tokens",
+        "cached_input_tokens",
+        "failed_calls",
+        #: Calls that reached the provider but whose token usage we could NOT read —
+        #: a failed attempt, or a response whose `usage_metadata` was absent.
+        #:
+        #: 🔑 **This is what makes the run's cost honest rather than merely low.** Those
+        #: calls were billed and we cannot price them, so the gateway reports the run's
+        #: figure as INCOMPLETE instead of publishing a confident under-count. Before
+        #: this existed a swallowed field and a fully-priced run were indistinguishable.
+        "unpriced_calls",
+    )
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._totals: dict[str, int] = dict.fromkeys(self._FIELDS, 0)
+        self._by_phase: dict[str, dict[str, int]] = {}
+        self._by_model: dict[str, dict[str, int]] = {}
+        #: Histogram of searches-fired per grounded request: {search_count: requests}.
+        #:
+        #: 🔑 **A sum cannot yield a median.** Reporting only totals makes
+        #: searches-per-request a single scalar, and aeo-agent-service measured why that
+        #: hides the important half: on 335 real requests the mean was 3.68 but the
+        #: median 3 and the **max 35**. One number cannot say that the expensive runs are
+        #: expensive for a structural reason, and "why did this run cost that" is exactly
+        #: the question the field exists to answer.
+        #:
+        #: A histogram rather than a list of per-call values: same information for these
+        #: statistics, bounded size regardless of run length, and it stays UNITS — the
+        #: gateway computes mean/median/p95 from it, as it computes money.
+        self._search_histogram: dict[int, int] = {}
+
+    def _bucket(self, index: dict[str, dict[str, int]], key: str) -> dict[str, int]:
+        b = index.get(key)
+        if b is None:
+            b = dict.fromkeys(self._FIELDS, 0)
+            index[key] = b
+        return b
+
+    def record(
+        self,
+        *,
+        phase: str,
+        model: str,
+        grounded: bool,
+        search_queries: int = 0,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        thinking_tokens: int = 0,
+        cached_input_tokens: int = 0,
+        failed: bool = False,
+        unpriced: bool = False,
+    ) -> None:
+        delta = {
+            "calls": 1,
+            "grounded_requests": 1 if grounded else 0,
+            "grounded_search_queries": search_queries,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "thinking_tokens": thinking_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "failed_calls": 1 if failed else 0,
+            "unpriced_calls": 1 if unpriced else 0,
+        }
+        with self._lock:
+            if grounded and not failed:
+                # Recorded for every completed grounded request INCLUDING zero-search
+                # ones. agent-service measured 29 of 335 (8.7%) firing no search at all —
+                # not missing data, a model that chose not to search. Dropping them would
+                # flatter the mean by ~10%.
+                self._search_histogram[search_queries] = (
+                    self._search_histogram.get(search_queries, 0) + 1
+                )
+            buckets = (
+                self._bucket(self._by_phase, phase or "unknown"),
+                self._bucket(self._by_model, model or "unknown"),
+            )
+            for bucket in buckets:
+                for f, v in delta.items():
+                    bucket[f] += v
+            for f, v in delta.items():
+                self._totals[f] += v
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            out: dict[str, Any] = dict(self._totals)
+            out["by_phase"] = [{"phase": k, **v} for k, v in sorted(self._by_phase.items())]
+            out["by_model"] = [{"model": k, **v} for k, v in sorted(self._by_model.items())]
+            # Keys stringified because this crosses a JSON boundary, where an int key
+            # would arrive as a string anyway — being explicit keeps both sides reading
+            # the same shape instead of one of them guessing.
+            out["search_histogram"] = {
+                str(k): v for k, v in sorted(self._search_histogram.items())
+            }
+            return out
+
+    def reset(self) -> None:
+        with self._lock:
+            self._totals = dict.fromkeys(self._FIELDS, 0)
+            self._by_phase = {}
+            self._by_model = {}
+            self._search_histogram = {}
+
+
+_cost_meter = _CostMeter()
+
+
+def _record_gemini_usage(resp: Any, *, phase: str, model: str, grounded: bool) -> None:
+    """Pull token and search counts off a Gemini response into the meter.
+
+    Every read is a `getattr` with a default, and both blocks swallow. These are preview
+    models on a moving SDK, and **a metering shim must never fail a call that already
+    succeeded and was already paid for** — a missing field costs one row of attribution,
+    whereas a raise here would throw away the answer we just bought.
+    """
+    searches = 0
+    in_tok = out_tok = think_tok = cached_tok = 0
+    # 🔑 Unreadable usage no longer looks like a free call. The metering still cannot
+    # raise — the answer is already bought and paid for — but the run now REPORTS that
+    # one of its calls could not be priced, so the gateway publishes the figure as
+    # incomplete instead of as a confident under-count.
+    unpriced = True
+    try:
+        usage = getattr(resp, "usage_metadata", None)
+        if usage is not None:
+            in_tok = int(getattr(usage, "prompt_token_count", 0) or 0)
+            out_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
+            think_tok = int(getattr(usage, "thoughts_token_count", 0) or 0)
+            # Cached input bills at a lower rate than fresh input. Captured so the
+            # gateway can flag a run whose cost it may be OVERSTATING, which is the
+            # direction that matters when the figure reaches a customer.
+            cached_tok = int(getattr(usage, "cached_content_token_count", 0) or 0)
+            # A response carrying a prompt count is a response we can price.
+            unpriced = in_tok == 0 and out_tok == 0
+    except Exception:  # noqa: BLE001 — metering must not break a paid-for call
+        pass
+    if grounded:
+        try:
+            for cand in getattr(resp, "candidates", None) or []:
+                gm = getattr(cand, "grounding_metadata", None)
+                if gm is None:
+                    continue
+                searches += len(getattr(gm, "web_search_queries", None) or [])
+        except Exception:  # noqa: BLE001
+            pass
+    _cost_meter.record(
+        phase=phase, model=model, grounded=grounded, search_queries=searches,
+        input_tokens=in_tok, output_tokens=out_tok, thinking_tokens=think_tok,
+        cached_input_tokens=cached_tok, unpriced=unpriced,
+    )
+
+
+def _record_claude_usage(resp: Any, *, phase: str, model: str, grounded: bool) -> None:
+    """Pull token counts off an Anthropic response into the meter.
+
+    🔴 **This path recorded NOTHING until 2026-08-27** — the parameter carried
+    `noqa: ARG001 — no metering shim on this path yet`. A run on `--provider claude`
+    therefore reported a cost of zero while we were being billed in full. Latent rather
+    than active, since gemini is the default, but a run's cost figure that silently reads
+    zero for a whole provider is exactly the failure the metering exists to prevent.
+
+    ⚠️ **Search count is not recoverable here.** Anthropic's `web_search` is a server
+    tool billed per search, and the count is not on `usage` the way gemini's
+    `webSearchQueries` is. A grounded claude call is therefore recorded as `unpriced`
+    even when its tokens read fine: we can price the tokens and cannot price the
+    searches, and reporting the token half as the whole would understate it silently.
+    """
+    in_tok = out_tok = cached_tok = 0
+    unpriced = True
+    try:
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            in_tok = int(getattr(usage, "input_tokens", 0) or 0)
+            out_tok = int(getattr(usage, "output_tokens", 0) or 0)
+            cached_tok = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+            unpriced = in_tok == 0 and out_tok == 0
+    except Exception:  # noqa: BLE001 — metering must not break a paid-for call
+        pass
+    _cost_meter.record(
+        phase=phase, model=model, grounded=grounded,
+        input_tokens=in_tok, output_tokens=out_tok, cached_input_tokens=cached_tok,
+        # Grounded claude calls bill searches we cannot count — see the docstring.
+        unpriced=unpriced or grounded,
+    )
 
 
 def gemini_provider(
@@ -171,8 +609,10 @@ def gemini_provider(
     temperature: float,
     retry_attempts: int,
     timeout_s: float,  # noqa: ARG001 — enforced by the caller via signal/thread
+    grounded: bool = True,
+    phase: str = "unknown",
 ) -> str:
-    """Default provider: Gemini with Google Search grounding.
+    """Default provider: Gemini, with Google Search grounding unless opted out.
 
     Lazy-imports google.genai so the module imports fine (for `score` and for
     tests) in environments without the SDK or an API key.
@@ -192,27 +632,77 @@ def gemini_provider(
             if _gemini_client is None:
                 _gemini_client = genai.Client(api_key=api_key)
 
+    # Fail before the first attempt if the allowance is already known gone. Checked
+    # here rather than in the caller so every phase inherits it from the one seam.
+    _quota_breaker.raise_if_tripped("gemini")
+
     last_exc: Exception | None = None
     for attempt in range(retry_attempts):
         try:
+            # An ungrounded call omits `tools` ENTIRELY rather than passing an empty
+            # list — the SDK forwards `tools: []` verbatim, and "no tools" is the
+            # absence of the key, not an empty one.
+            config_kwargs: dict[str, Any] = {"temperature": temperature}
+            if grounded:
+                config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
             resp = _gemini_client.models.generate_content(
                 model=model,
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                    tools=[types.Tool(google_search=types.GoogleSearch())],
-                    temperature=temperature,
-                ),
+                config=types.GenerateContentConfig(**config_kwargs),
             )
+            _record_gemini_usage(resp, phase=phase, model=model, grounded=grounded)
+            _quota_breaker.note_success()
             return resp.text or ""
         except Exception as exc:  # noqa: BLE001 — retry orchestration
             last_exc = exc
             msg = str(exc)
+            throttled = _is_short_window_throttle(msg)
+            quota = _is_quota_error(msg)
+            # ⚠️ EVERY failed attempt, not only the quota ones, and every attempt of a
+            # call that later succeeds. A request that reached the model was billed even
+            # if it then timed out or returned malformed JSON, and its tokens are
+            # unknowable — so it counts as `unpriced` rather than as nothing. Recording
+            # only quota failures made retries and timeouts free on the invoice.
+            #
+            # A throttle or a fail-fast quota trip never reached the model, so neither is
+            # billable: those are counted as failed but NOT as unpriced.
+            _cost_meter.record(
+                phase=phase, model=model, grounded=grounded, failed=True,
+                unpriced=not (throttled or quota),
+            )
+            if quota:
+                # ⚠️ Raise IMMEDIATELY on the trip, before the sleep and before the
+                # attempt budget is consulted. Sleeping first is what turned one dead
+                # allowance into 16 minutes of guaranteed-futile backoff.
+                if _quota_breaker.note_quota_error():
+                    log.warning(
+                        "gemini quota breaker tripped after %d consecutive quota error(s) "
+                        "— failing every remaining call fast",
+                        QUOTA_TRIP_THRESHOLD,
+                    )
+                    raise ProviderQuotaExhausted(f"gemini quota exhausted: {msg[:200]}") from exc
+                if _quota_breaker.tripped:
+                    raise ProviderQuotaExhausted(f"gemini quota exhausted: {msg[:200]}") from exc
             if attempt == retry_attempts - 1:
                 break
-            wait = 15 * (2 ** attempt) if ("429" in msg or "RESOURCE_EXHAUSTED" in msg) else 5
+            # ⚠️ Long backoff for a throttle as well as for a quota error, and this is
+            # NOT the same condition as the breaker's.
+            #
+            # Narrowing `_is_quota_error` to exclude per-minute throttles fixed the
+            # false positive above, but this line keyed the BACKOFF off the same verdict
+            # — so the fix on its own would have dropped a rate-limited retry from 15s
+            # to 5s, shortening the wait on precisely the error that clears by waiting.
+            # Two questions, two predicates: "should we stop?" and "how long before we
+            # try again?"
+            wait = 15 * (2 ** attempt) if (quota or throttled) else 5
             log.warning("gemini retry %d/%d in %ds: %s", attempt + 1, retry_attempts, wait, msg[:200])
             time.sleep(wait)
     assert last_exc is not None
+    if not isinstance(last_exc, ProviderQuotaExhausted) and _is_quota_error(str(last_exc)):
+        # Exhausted the attempt budget on quota errors without reaching the trip
+        # threshold. Still a quota failure to the caller — the distinction the caller
+        # cares about is the CAUSE, not whether the breaker happened to latch.
+        raise ProviderQuotaExhausted(f"gemini quota exhausted: {str(last_exc)[:200]}") from last_exc
     raise last_exc
 
 
@@ -233,6 +723,8 @@ def claude_provider(
     temperature: float,  # noqa: ARG001 — Opus 4.8/4.7 reject temperature; steered by prompt
     retry_attempts: int,
     timeout_s: float,
+    grounded: bool = True,
+    phase: str = "unknown",
 ) -> str:
     """Alternative provider: Claude (Anthropic) with the web-search server tool.
 
@@ -254,7 +746,12 @@ def claude_provider(
                 _claude_client = anthropic.Anthropic()  # resolves ANTHROPIC_API_KEY or a profile
 
     client = _claude_client.with_options(timeout=timeout_s)
-    tools = [{"type": _claude_web_search_tool(model), "name": "web_search"}]
+    # Ungrounded: no tools at all, so the server-tool loop below can never see a
+    # `pause_turn` and falls through on its first pass. Absent key, not empty list —
+    # same reasoning as gemini's above.
+    tool_kwargs: dict[str, Any] = {}
+    if grounded:
+        tool_kwargs["tools"] = [{"type": _claude_web_search_tool(model), "name": "web_search"}]
 
     last_exc: Exception | None = None
     for attempt in range(retry_attempts):
@@ -264,13 +761,16 @@ def claude_provider(
             # Server-tool loop: web_search can pause the turn (stop_reason=pause_turn)
             # to run more searches; re-send to resume. Bounded so a runaway can't hang.
             for _ in range(6):
-                resp = client.messages.create(model=model, max_tokens=8192, tools=tools, messages=messages)
+                resp = client.messages.create(
+                    model=model, max_tokens=8192, messages=messages, **tool_kwargs
+                )
                 if resp.stop_reason == "pause_turn":
                     messages.append({"role": "assistant", "content": resp.content})
                     continue
                 final_text = "".join(
                     b.text for b in resp.content if getattr(b, "type", None) == "text"
                 )
+                _record_claude_usage(resp, phase=phase, model=model, grounded=grounded)
                 break
             return final_text
         except Exception as exc:  # noqa: BLE001 — retry orchestration
@@ -292,6 +792,8 @@ def mock_provider(
     temperature: float,  # noqa: ARG001
     retry_attempts: int,  # noqa: ARG001
     timeout_s: float,  # noqa: ARG001
+    grounded: bool = True,  # noqa: ARG001 — accepted so the seam stays uniform
+    phase: str = "unknown",  # noqa: ARG001 — ditto
 ) -> str:
     """Offline deterministic provider for `--mock`.
 
@@ -485,6 +987,37 @@ def parse_json_array(text: str) -> list[dict[str, Any]]:
 # =============================================================================
 
 
+def _discovery_abort(
+    *, exc: Exception, failed: int, total: int
+) -> ScanAbort | None:
+    """Decide whether one query failure ends the sweep. `None` means carry on.
+
+    Two independent triggers, in priority order:
+
+    1. **A quota failure aborts on the first one**, ignoring both thresholds. The
+       breaker is sticky and process-wide, so it has already established that every
+       remaining query will fail — there is nothing left to sample, only money to spend.
+    2. **A rate breach** needs `DISCOVERY_FAILURE_ABORT_MIN` failures *and* more than
+       `DISCOVERY_FAILURE_ABORT_RATE` of the set. Both conditions, not either.
+    """
+    if isinstance(exc, ProviderQuotaExhausted):
+        return ProviderQuotaExhausted(
+            f"provider quota exhausted after {failed} of {total} discovery "
+            f"query/queries: {str(exc)[:200]}"
+        )
+    if total <= 0:
+        return None
+    if failed < DISCOVERY_FAILURE_ABORT_MIN:
+        return None
+    if failed / total <= DISCOVERY_FAILURE_ABORT_RATE:
+        return None
+    return DiscoveryFailureRateExceeded(
+        f"{failed} of {total} discovery query/queries failed "
+        f"({failed / total:.0%} > {DISCOVERY_FAILURE_ABORT_RATE:.0%} threshold); "
+        f"last error: {str(exc)[:200]}"
+    )
+
+
 def discover(
     ctx: dict[str, Any],
     *,
@@ -534,23 +1067,32 @@ def discover(
             )
             tasks.append((source_name, name_field, prompt))
 
-    def _run_query(task: tuple[str, str, str]) -> tuple[str, list[tuple[str, dict[str, Any]]]]:
+    def _run_query(
+        task: tuple[str, str, str],
+    ) -> tuple[str, list[tuple[str, dict[str, Any]]], Exception | None]:
         source_name, name_field, prompt = task
         try:
             text = provider(
                 prompt, model=model, temperature=temperature,
                 retry_attempts=retry_attempts, timeout_s=_QUERY_TIMEOUT_S,
+                phase="discovery",
             )
         except Exception as exc:  # noqa: BLE001 — one bad query mustn't kill the source
+            # The tolerance is unchanged: this returns rather than raising, so a single
+            # bad query still cannot kill its source. What changed is that the failure
+            # is now REPORTED to the aggregator instead of being swallowed into a
+            # warning — an outage that failed every query used to be indistinguishable
+            # from a market with nobody in it, from the database all the way to the
+            # customer's screen.
             log.warning("query failed source=%s: %s", source_name, str(exc)[:200])
-            return source_name, []
+            return source_name, [], exc
         rows: list[tuple[str, dict[str, Any]]] = []
         for row in parse_json_array(text):
             name = str(row.get(name_field, "") or "").strip()
             norm = normalize_name(name)
             if norm:
                 rows.append((norm, row))
-        return source_name, rows
+        return source_name, rows, None
 
     # Workers only fetch+parse and RETURN rows; the main thread aggregates into
     # `groups` and emits — so no shared-state locking is needed.
@@ -558,11 +1100,31 @@ def discover(
     name_fields = {s: nf for s, nf, _ in tasks}
     per_source_rows = {s: 0 for s in per_source_total}
     per_source_done = {s: 0 for s in per_source_total}
+    failed_queries = 0
+    total_queries = len(tasks)
+    abort: ScanAbort | None = None
     if tasks:
         with ThreadPoolExecutor(max_workers=min(max_concurrency, len(tasks))) as pool:
             futures = [pool.submit(_run_query, t) for t in tasks]
             for fut in as_completed(futures):
-                source_name, rows = fut.result()
+                source_name, rows, exc = fut.result()
+                if exc is not None:
+                    failed_queries += 1
+                    abort = _discovery_abort(
+                        exc=exc, failed=failed_queries, total=total_queries
+                    )
+                    if abort is not None:
+                        # Stop the sweep HERE. `cancel()` cannot recall a query already
+                        # in flight, but it stops every queued one from ever being
+                        # issued — which on a fanned-out sweep is most of them, and is
+                        # the difference between paying for 7 queries and paying for 60.
+                        cancelled = sum(1 for f in futures if f.cancel())
+                        _log_from(ctx)(
+                            f"[aeo] aborting discovery: {abort.reason} "
+                            f"({failed_queries}/{total_queries} queries failed; "
+                            f"{cancelled} not issued)"
+                        )
+                        break
                 for norm, row in rows:
                     groups.setdefault(norm, []).append(
                         {"source": source_name, "name_field": name_fields[source_name], "raw": row}
@@ -572,6 +1134,18 @@ def discover(
                 if per_source_done[source_name] == per_source_total[source_name]:
                     emit({"type": "phase_complete", "phase": source_name,
                           "count": per_source_rows[source_name]})
+
+    if abort is not None:
+        raise abort
+
+    if failed_queries:
+        # Survived the threshold, so these results stand — but say so loudly. A run that
+        # quietly returns 7 prospects out of 60 attempted queries looks identical to a
+        # thorough one, and that is exactly what shipped to a customer on 2026-08-26.
+        _log_from(ctx)(
+            f"[aeo] DEGRADED: {failed_queries}/{total_queries} discovery queries failed "
+            f"— results are partial"
+        )
 
     prospects = _assemble_prospects(groups=groups, scan_run_id=scan_run_id,
                                     canonical=canonical_fields_from_sources(sources),

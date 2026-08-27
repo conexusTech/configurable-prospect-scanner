@@ -365,14 +365,18 @@ def test_discover_uses_provider_config_model():
     """The model from provider_config reaches the provider (asserted via capture)."""
     seen = {}
 
-    def capture(prompt, *, model, temperature, retry_attempts, timeout_s):
+    def capture(prompt, *, model, temperature, retry_attempts, timeout_s, **kwargs):
         seen["model"] = model
+        seen["phase"] = kwargs.get("phase")
         return fake_provider_shared(prompt)
 
     als.discover(TWO_SOURCE_CTX, scan_run_id="s", provider=capture, emit=lambda e: None,
                  provider_config={"model": "claude-opus-4-8", "temperature": 0.1,
                                   "entries_per_query": 3, "retry_attempts": 3})
     assert seen["model"] == "claude-opus-4-8"
+    # Discovery tags its calls so per-phase cost attribution is real rather than
+    # bucketed under "unknown" — the estimate/actual report is grouped by this.
+    assert seen["phase"] == "discovery"
 
 
 # ── validation ──────────────────────────────────────────────────────────────

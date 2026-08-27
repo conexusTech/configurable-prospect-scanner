@@ -162,6 +162,7 @@ def discover_zips(
             temperature=provider_config.get("temperature", 0.1),
             retry_attempts=PHASE_RETRY_ATTEMPTS,
             timeout_s=DEFAULT_CALL_TIMEOUT_S,
+            phase="zip_discovery",
         )
         return parse_json_array(raw)
 

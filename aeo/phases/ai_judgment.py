@@ -35,6 +35,16 @@ Design choices, none forced by the contract:
    concurrency and retry — the reason `_concurrent.py` exists — carry the 429 risk, and
    these calls are ungrounded, so far lighter than the grounded validation calls that
    set that bound.
+
+   🔑 **That last sentence was false for the entire life of this phase, and it is worth
+   knowing why the comment did not save us.** `gemini_provider` attached the Google
+   Search tool unconditionally, so every judgment call was a *billed grounded search
+   request* on the pro model — the most expensive combination in the engine — for a
+   phase that asks the model for no external research. The reasoning above was sound;
+   nothing implemented it, and a false premise in a justification reads exactly like a
+   true one. The call below now passes `grounded=False` explicitly, which is what makes
+   the sentence true. If a future edit drops that keyword the cost returns silently, so
+   `tests/test_ai_judgment.py` asserts it on the wire rather than trusting this note.
 2. **The vocabulary comes from AEO, and is never invented here.** `build_tool_context`
    refuses a context without it. A stage this phase made up would be a column no
    operator defined.
@@ -364,6 +374,11 @@ def judge_prospects(
             temperature=provider_config.get("temperature", 0.1),
             retry_attempts=PHASE_RETRY_ATTEMPTS,
             timeout_s=DEFAULT_CALL_TIMEOUT_S,
+            # This phase reasons ONLY over data the earlier phases already collected —
+            # it retrieves nothing, so it must not pay the grounded-search meter. See
+            # the module docstring for the invoice that found this.
+            grounded=False,
+            phase="judgment",
         )
         return parse_json_array(raw)
 

@@ -244,6 +244,7 @@ def enrich_prospects(
             temperature=provider_config.get("temperature", 0.1),
             retry_attempts=PHASE_RETRY_ATTEMPTS,
             timeout_s=DEFAULT_CALL_TIMEOUT_S,
+            phase="enrichment",
         )
         return _coerce_rows(parse_json_array(raw) or [], fields, limit)
 

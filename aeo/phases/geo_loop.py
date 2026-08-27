@@ -108,6 +108,7 @@ def verify_locations(
             temperature=provider_config.get("temperature", 0.1),
             retry_attempts=PHASE_RETRY_ATTEMPTS,
             timeout_s=DEFAULT_CALL_TIMEOUT_S,
+            phase="geography",
         )
         parsed = parse_json_array(raw)
         return parsed[0] if parsed else {}

@@ -683,6 +683,31 @@ def main() -> int:
                     f"(geography.targeting.use_zip_discovery is not set)"
                 )
 
+        def _abort_if_quota_dead(after: str) -> None:
+            """Terminate the run if the provider's allowance died during `after`.
+
+            ⚠️ **Every per-prospect phase runs through `map_bounded`, which swallows one
+            item's exception by contract** ("one item must not fail a phase") and yields
+            `None` in its place. That rule is right for a malformed answer and wrong for
+            a dead quota: with the allowance gone, EVERY item fails, and the phase
+            returns a full set of Nones that reads downstream as "nothing found". Five
+            phases behave this way — geography, validation, enrichment, contacts,
+            judgment — which is why `judged 0/7` was only ever a log line.
+
+            Checked between phases rather than inside `map_bounded` on purpose. The
+            breaker short-circuits every later call with no API request and no sleep, so
+            a phase that starts after the allowance dies costs nothing and finishes
+            immediately; there is no need to reach into a utility whose timeout and
+            shutdown semantics are load-bearing and carefully commented.
+            """
+            if als._quota_breaker.tripped:
+                raise als.ProviderQuotaExhausted(
+                    f"provider quota exhausted during {after} "
+                    f"({als._quota_breaker.total_quota_errors} quota error(s) this run)"
+                )
+
+        _abort_if_quota_dead("zip discovery")
+
         # Geography as a loop condition, not an instruction. Prompting proved
         # unreliable — identical prompt/image/config gave in-area results standalone
         # and out-of-area results in-container — so candidates are verified against
@@ -827,6 +852,8 @@ def main() -> int:
         # validation filtered the set" (violated on 2 of 8). What this counts is what we
         # SENT. Only the gateway can report what it stored, because only it knows what it
         # dropped — and it already logs that skip count per callback.
+        _abort_if_quota_dead("geography verification")
+
         total_discovered = len(prospects) + len(geo_rejects)
 
         # `geo_rejects` is already populated by the verify loop above — rejections
@@ -848,6 +875,7 @@ def main() -> int:
                 parse_json_array=als.parse_json_array,
                 emit=sink.emit,
             )
+            _abort_if_quota_dead("signal validation")
 
         # ── enrichment lanes ──────────────────────────────────────────────
         # N authored lanes, each attaching its own shape of fact to a prospect the
@@ -894,6 +922,7 @@ def main() -> int:
                 f"enriched {len(lane_results)} prospects across "
                 f"{len(lane_defs)} lane(s)"
             )
+            _abort_if_quota_dead("enrichment")
 
         # The scorer reads lane rows off the prospect, so put them there. Without this
         # the rows persist to AEO and are invisible to every factor that binds to a lane.
@@ -962,6 +991,9 @@ def main() -> int:
                 signal_fields=signal_fields,
                 emit=sink.emit,
             )
+            # `judged 0/7` used to be a log line and nothing more — the phase this
+            # guard most needed to cover.
+            _abort_if_quota_dead("pipeline-stage judgment")
             for p in prospects:
                 judged = judgments.get(str(p.get("id")))
                 if not judged:
@@ -1059,9 +1091,27 @@ def main() -> int:
                     "total_validated": len(validations),
                     "total_scored": len(scored),
                     "provider": provider_name,
+                    # What the provider actually billed us for. UNITS, not money — the
+                    # gateway holds the price table and prices these, so a rate change
+                    # or a calibrated searches-per-request multiplier re-prices history
+                    # instead of leaving it permanently wrong.
+                    #
+                    # ⚠️ `ScanCompletedSummaryDto` filters this summary to DECLARED KEYS
+                    # ONLY, silently. Anything added here needs the matching field in
+                    # aeo-backend or it is dropped at the wire with no error — exactly
+                    # how total_zips and total_validated were NULL for a day while their
+                    # rows persisted fine.
+                    "cost": als._cost_meter.snapshot(),
                 },
             }
         )
+    except als.ScanAbort as exc:
+        # A known, named failure mode. The reason code is prefixed onto the message
+        # because `scan_runs.error` is free text and free text is why this class of
+        # outage was invisible: consumers match the stable prefix, not the prose.
+        sink.emit_safe({"type": "error", "message": f"{exc.reason}: {exc}"})
+        _log(f"run failed ({exc.reason}): {exc}")
+        return 1
     except Exception as exc:  # noqa: BLE001 — report, then terminate non-zero
         sink.emit_safe({"type": "error", "message": str(exc)})
         _log(f"run failed: {exc}")
