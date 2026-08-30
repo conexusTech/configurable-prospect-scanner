@@ -94,6 +94,30 @@ JUDGMENT_FIELDS = (
 #: rather than assuming the judgement survived.
 DEFAULT_BATCH_SIZE = 1
 
+#: The fit request, included ONLY under the LEGACY additive model.
+#:
+#: 🔴 **The plan said to delete this outright. That would have been a regression.**
+#: The gated model drops `ai_adjustment` from the total, so asking for it there spends
+#: tokens on a term nothing reads — which is what the plan was aiming at. But all five
+#: live skills are LEGACY, and `ai_score_adjustment` is a real component of their score:
+#: deleting it unconditionally would have quietly removed a scoring input from every
+#: customer in production, in a change whose stated purpose was to stop wasting tokens.
+_FIT_SECTION = """ALSO RATE THE FIT
+Give a score adjustment from {adj_min} to {adj_max}. Positive when this prospect is a \
+better fit for what the seller sells than its raw data suggests; negative when worse. \
+0 when you have no basis. This adjusts an existing score — it is not the score.
+"""
+
+_ADJUSTMENT_FIELD = '"adjustment": <number>, \\\n'
+
+#: How much of a returned id must match a real one before a garbled id is recovered.
+#:
+#: Half a UUID. Long enough that an invented id cannot reach it by chance, short enough
+#: to survive several dropped characters. Also excludes short ids entirely — a two-
+#: character test id can never be "recognisably garbled", and guessing at one would be
+#: exactly the unsafe pairing this guard exists to prevent.
+_ID_RECOVERY_MIN_PREFIX = 16
+
 _PROMPT = """You are a sales operations analyst placing discovered prospects into a \
 pipeline stage for a seller.
 
@@ -142,11 +166,7 @@ buying decision falls relative to today.
 contact out of view.
 - Stay stage reasoning. This is not a general summary of the company.
 
-ALSO RATE THE FIT
-Give a score adjustment from {adj_min} to {adj_max}. Positive when this prospect is a \
-better fit for what the seller sells than its raw data suggests; negative when worse. \
-0 when you have no basis. This adjusts an existing score — it is not the score.
-
+{fit_section}
 THE PROSPECTS
 {prospects}
 
@@ -155,8 +175,7 @@ Return ONLY a JSON array, one object per prospect, no other text:
 "reasoning": "<three or four sentences per HOW TO WRITE THE REASONING above: the event \
 and its date, the industry and location where they mattered, what it implies, and when \
 the buying decision falls>", \
-"adjustment": <number>, \
-"event": "<the ONE event you based the stage on, in plain words a salesperson would \
+{adjustment_field}"event": "<the ONE event you based the stage on, in plain words a salesperson would \
 read — 'Started leasing', 'Building permit issued', 'Acquired the property'. Empty \
 string if there was no dated event>", \
 "event_date": "<that event's date exactly as it was given to you, or empty string>"}}]
@@ -299,6 +318,7 @@ def judge_prospects(
     provider_config: dict[str, Any],
     parse_json_array: Callable[[str], list[dict[str, Any]]],
     adjustment_bounds: tuple[float, float] = (-15.0, 15.0),
+    request_adjustment: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
     signal_fields: Sequence[str] | None = None,
     emit: Callable[[dict[str, Any]], None] | None = None,
@@ -340,6 +360,11 @@ def judge_prospects(
     # arrives — it just arrives unlabelled, without its event type paired to it.
     resolved_signal_fields = [str(f) for f in (signal_fields or pipeline.get("signal_fields") or [])]
     adj_min, adj_max = adjustment_bounds
+    # 🔴 Asked for only under the LEGACY model. See `_FIT_SECTION` — the gated model
+    # drops `ai_adjustment` from the total, so requesting it there buys nothing, but
+    # every live skill is legacy and still scores with it.
+    fit_section = _FIT_SECTION if request_adjustment else ""
+    adjustment_field = _ADJUSTMENT_FIELD if request_adjustment else ""
     stage_block = _stage_lines(stages)
 
     targets = [p for p in prospects if p.get("id")]
@@ -362,6 +387,8 @@ def judge_prospects(
             stages=stage_block,
             adj_min=adj_min,
             adj_max=adj_max,
+            fit_section=fit_section,
+            adjustment_field=adjustment_field,
             prospects=_prospect_lines(batch, resolved_signal_fields),
         )
         raw = provider(
@@ -392,14 +419,75 @@ def judge_prospects(
     judged: dict[str, dict[str, Any]] = {}
     for batch, parsed in zip(batches, results):
         by_id = {str(p.get("id")): p for p in batch}
-        for item in parsed or []:
-            if not isinstance(item, dict):
-                continue
+        items = [i for i in (parsed or []) if isinstance(i, dict)]
+
+        # 🔴 **A GARBLED id used to discard a perfectly good verdict, silently.**
+        #
+        # Measured 2026-08-31 re-judging groninger USA. The model returned a correct,
+        # well-reasoned "7 - Too Late" and echoed the id as
+        #   2a6855ed-bbdc-503f-813d-398e7a7a18   (34 chars)
+        # against the real
+        #   2a6855ed-bbdc-503f-813d-398e5e7a7a18 (36 chars)
+        # — two characters dropped from the middle of the last segment. The exact-match
+        # lookup missed, the item was `continue`d, and the phase logged `judged 0/1`:
+        # indistinguishable from the model refusing to answer.
+        #
+        # ⚠️ That log line has a second cause already documented (a dead provider quota
+        # turning every item into a None), so `judged 0/N` has meant two very different
+        # things and neither was visible. This is why the fallback below LOGS.
+        #
+        # The recovery is deliberately narrow: only when exactly ONE prospect and ONE
+        # item are left unmatched is the pairing unambiguous. With two of each there is
+        # no way to tell which verdict belongs to which company, and attaching one to
+        # the wrong prospect is far worse than leaving both unjudged. `DEFAULT_BATCH_SIZE`
+        # is 1, so the narrow case is also the overwhelmingly common one.
+        # Claim ids as they match, so a DUPLICATE id in the response cannot pair twice
+        # — the first verdict wins, which is the existing contract.
+        matched: dict[int, str] = {}
+        claimed: set[str] = set()
+        for idx, item in enumerate(items):
             pid = str(item.get("id") or "")
-            if pid not in by_id or pid in judged:
-                # An id the model invented, or a duplicate. Dropping it leaves the
-                # prospect unjudged, which the caller handles — accepting it would
-                # attach a verdict to the wrong company.
+            if pid in by_id and pid not in claimed and pid not in judged:
+                matched[idx] = pid
+                claimed.add(pid)
+
+        loose_items = [i for i in range(len(items)) if i not in matched]
+        loose_ids = [k for k in by_id if k not in claimed and k not in judged]
+        if len(loose_items) == 1 and len(loose_ids) == 1:
+            returned = str(items[loose_items[0]].get("id") or "")
+            real = loose_ids[0]
+            # 🔑 Recover only when the returned id is RECOGNISABLY THE SAME ONE,
+            # garbled — never merely because one of each is left over.
+            #
+            # A dropped character leaves a long shared prefix (28 of 36 in the measured
+            # case). An id the model INVENTED shares almost nothing, and attaching one
+            # of those would give a real company a verdict written about a company that
+            # does not exist — strictly worse than leaving it unjudged, and the reason
+            # the plain leftover-pairing rule is not safe.
+            shared = 0
+            for a, b in zip(returned, real):
+                if a != b:
+                    break
+                shared += 1
+            if len(real) >= _ID_RECOVERY_MIN_PREFIX and shared >= _ID_RECOVERY_MIN_PREFIX:
+                matched[loose_items[0]] = real
+                claimed.add(real)
+                if emit:
+                    emit(
+                        {
+                            "type": "judgment_id_recovered",
+                            "prospect_id": real,
+                            "model_returned": returned,
+                            "shared_prefix": shared,
+                        }
+                    )
+
+        for idx, item in enumerate(items):
+            pid = matched.get(idx)
+            if not pid:
+                # Genuinely unattributable: an id the model invented in a batch where
+                # more than one candidate remains. Attaching it would risk giving one
+                # company another's verdict.
                 continue
 
             stage = str(item.get("stage") or "").strip()

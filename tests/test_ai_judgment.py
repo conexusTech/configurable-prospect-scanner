@@ -664,3 +664,65 @@ def test_judgment_tags_its_calls_for_cost_attribution():
     )
     run([prospect("p1")], provider)
     assert {kw.get("phase") for kw in provider.calls} == {"judgment"}
+
+
+class TestGarbledIdRecovery:
+    """A model that mistypes one character of a UUID used to lose the whole verdict.
+
+    🔴 Measured 2026-08-31 re-judging groninger USA. The model returned a correct,
+    well-reasoned verdict and echoed the id two characters short:
+        real   2a6855ed-bbdc-503f-813d-398e5e7a7a18
+        echoed 2a6855ed-bbdc-503f-813d-398e7a7a18
+    The exact-match lookup missed and the item was silently dropped, logging
+    `judged 0/1` — indistinguishable from the model refusing to answer, and
+    indistinguishable from the OTHER known cause of that same line (a dead provider
+    quota turning every item into a None).
+    """
+
+    REAL = "2a6855ed-bbdc-503f-813d-398e5e7a7a18"
+    GARBLED = "2a6855ed-bbdc-503f-813d-398e7a7a18"
+
+    def test_a_garbled_uuid_is_recovered(self):
+        prov = responder([{"id": self.GARBLED, "stage": "7 - Too Late",
+                           "reasoning": "r", "adjustment": 0}])
+        out = run([prospect(self.REAL)], prov)
+        assert out[self.REAL]["pipeline_status"] == "7 - Too Late"
+
+    def test_the_recovery_is_ANNOUNCED_never_silent(self):
+        # Both causes of `judged 0/N` were invisible. A recovery that hid itself would
+        # add a third invisible thing to the same log line.
+        events = []
+        prov = responder([{"id": self.GARBLED, "stage": "7 - Too Late",
+                           "reasoning": "r", "adjustment": 0}])
+        run([prospect(self.REAL)], prov, emit=events.append)
+        rec = [e for e in events if e["type"] == "judgment_id_recovered"]
+        assert len(rec) == 1
+        assert rec[0]["prospect_id"] == self.REAL
+        assert rec[0]["model_returned"] == self.GARBLED
+        assert rec[0]["shared_prefix"] >= 16
+
+    def test_an_INVENTED_id_is_still_dropped(self):
+        # The safety property the leftover-pairing rule would have broken: attaching a
+        # verdict written about a company that does not exist is strictly worse than
+        # leaving a real one unjudged.
+        prov = responder([{"id": "does-not-exist", "stage": "7 - Too Late",
+                           "reasoning": "r", "adjustment": 0}])
+        assert run([prospect(self.REAL)], prov) == {}
+
+    def test_a_SHORT_id_is_never_recovered(self):
+        # Two characters cannot be "recognisably garbled"; guessing at one is the unsafe
+        # pairing this guard exists to prevent.
+        prov = responder([{"id": "zz", "stage": "7 - Too Late",
+                           "reasoning": "r", "adjustment": 0}])
+        assert run([prospect("p1")], prov) == {}
+
+    def test_recovery_never_fires_when_TWO_are_ambiguous(self):
+        # With two prospects and two unmatched verdicts there is no way to tell which
+        # belongs to which, so both stay unjudged rather than risk a swap.
+        a = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        b = "ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee"
+        prov = responder([
+            {"id": a[:-2], "stage": "7 - Too Late", "reasoning": "r", "adjustment": 0},
+            {"id": b[:-2], "stage": "4 - Active Pursuit", "reasoning": "r", "adjustment": 0},
+        ])
+        assert run([prospect(a), prospect(b)], prov, batch_size=2) == {}

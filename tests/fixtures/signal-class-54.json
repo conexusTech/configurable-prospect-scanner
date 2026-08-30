@@ -1,0 +1,278 @@
+{
+  "$comment": "DERIVED from run 741b7b3b, not transcribed. 54 distinct signal_type phrasings across 72 signal rows - every phrasing the model actually produced. Regenerate with the query in the test docstring; do not hand-edit.",
+  "source_run": "741b7b3b-c3ed-40bc-8d84-725de4986f94",
+  "distinct_phrasings": 54,
+  "signal_rows": 72,
+  "phrasings": [
+    {
+      "signal_type": "leadership change",
+      "rows": 5,
+      "expected_class": "leadership_change"
+    },
+    {
+      "signal_type": "workforce stress event",
+      "rows": 4,
+      "expected_class": "workforce_change"
+    },
+    {
+      "signal_type": "low utilization complaints",
+      "rows": 3,
+      "expected_class": "dissatisfaction"
+    },
+    {
+      "signal_type": "employee sentiment",
+      "rows": 2,
+      "expected_class": "dissatisfaction"
+    },
+    {
+      "signal_type": "m&a activity",
+      "rows": 2,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "recent benefit offering change",
+      "rows": 2,
+      "expected_class": "benefits_change"
+    },
+    {
+      "signal_type": "rfp activity",
+      "rows": 2,
+      "expected_class": "rfp_active"
+    },
+    {
+      "signal_type": "workforce expansion",
+      "rows": 2,
+      "expected_class": "workforce_change"
+    },
+    {
+      "signal_type": "workforce stress",
+      "rows": 2,
+      "expected_class": "workforce_change"
+    },
+    {
+      "signal_type": "workforce stress / expansion",
+      "rows": 2,
+      "expected_class": "workforce_change"
+    },
+    {
+      "signal_type": "workforce stress events",
+      "rows": 2,
+      "expected_class": "workforce_change"
+    },
+    {
+      "signal_type": "workforce_stress",
+      "rows": 2,
+      "expected_class": "workforce_change"
+    },
+    {
+      "signal_type": "acquisition / integration",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "acquisition and benefit consolidation",
+      "rows": 1,
+      "expected_class": "benefits_change"
+    },
+    {
+      "signal_type": "benefit filing change",
+      "rows": 1,
+      "expected_class": "benefits_change"
+    },
+    {
+      "signal_type": "benefit integration activity",
+      "rows": 1,
+      "expected_class": "benefits_change"
+    },
+    {
+      "signal_type": "benefit offering change",
+      "rows": 1,
+      "expected_class": "benefits_change"
+    },
+    {
+      "signal_type": "benefit offering review",
+      "rows": 1,
+      "expected_class": "benefits_change"
+    },
+    {
+      "signal_type": "benefit optimization activity",
+      "rows": 1,
+      "expected_class": "benefits_change"
+    },
+    {
+      "signal_type": "benefit plan activity",
+      "rows": 1,
+      "expected_class": "benefits_change"
+    },
+    {
+      "signal_type": "benefit strategy shift",
+      "rows": 1,
+      "expected_class": "benefits_change"
+    },
+    {
+      "signal_type": "benefits strategy recognition",
+      "rows": 1,
+      "expected_class": "benefits_change"
+    },
+    {
+      "signal_type": "broker change",
+      "rows": 1,
+      "expected_class": "broker_carrier_change"
+    },
+    {
+      "signal_type": "broker_relationship_change",
+      "rows": 1,
+      "expected_class": "broker_carrier_change"
+    },
+    {
+      "signal_type": "business expansion and job creation",
+      "rows": 1,
+      "expected_class": "workforce_change"
+    },
+    {
+      "signal_type": "client advisory activity",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "corporate transaction (spin-off)",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "cost_reduction_initiative",
+      "rows": 1,
+      "expected_class": null
+    },
+    {
+      "signal_type": "employee_sentiment",
+      "rows": 1,
+      "expected_class": "dissatisfaction"
+    },
+    {
+      "signal_type": "financial/operational stress",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "financial_restructuring",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "financial_stress",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "headquarters relocation",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "industry recognition",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "key personnel change (benefits leadership)",
+      "rows": 1,
+      "expected_class": "benefits_change"
+    },
+    {
+      "signal_type": "leadership_change",
+      "rows": 1,
+      "expected_class": "leadership_change"
+    },
+    {
+      "signal_type": "low benefit satisfaction",
+      "rows": 1,
+      "expected_class": "dissatisfaction"
+    },
+    {
+      "signal_type": "low utilization / employee dissatisfaction",
+      "rows": 1,
+      "expected_class": "dissatisfaction"
+    },
+    {
+      "signal_type": "m&a / integration",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "major funding/ownership change",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "market recognition",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "merger or acquisition",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "network consolidation",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "operational merger",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "recruitment-driven benefit focus",
+      "rows": 1,
+      "expected_class": "benefits_change"
+    },
+    {
+      "signal_type": "senior leadership appointment",
+      "rows": 1,
+      "expected_class": "leadership_change"
+    },
+    {
+      "signal_type": "strategic integration",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "strategic partnership / vendor optimization",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "strategy shift",
+      "rows": 1,
+      "expected_class": "corporate_event"
+    },
+    {
+      "signal_type": "workforce growth",
+      "rows": 1,
+      "expected_class": "workforce_change"
+    },
+    {
+      "signal_type": "workforce sentiment shift",
+      "rows": 1,
+      "expected_class": "dissatisfaction"
+    },
+    {
+      "signal_type": "workforce stress / employee sentiment",
+      "rows": 1,
+      "expected_class": "dissatisfaction"
+    },
+    {
+      "signal_type": "workforce stress and negative employee sentiment",
+      "rows": 1,
+      "expected_class": "dissatisfaction"
+    },
+    {
+      "signal_type": "workforce_stress_event",
+      "rows": 1,
+      "expected_class": "workforce_change"
+    }
+  ]
+}

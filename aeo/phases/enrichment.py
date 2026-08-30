@@ -35,6 +35,7 @@ from aeo.phases._concurrent import (
     concurrency_from,
     map_bounded,
 )
+from aeo.signal_class import classify
 
 #: `validation_data` keys owned by the qualification verdict. A lane may not take one of
 #: these names or it would overwrite the verdict it depends on.
@@ -188,10 +189,44 @@ def _coerce_rows(
                 )
             row[key] = "" if value is None else value
         if any(str(v).strip() for v in row.values()):
+            _attach_signal_class(row)
             rows.append(row)
         if limit and len(rows) >= limit:
             break
     return rows
+
+
+#: The field whose free text carries a switching signal's kind. The ONE field name
+#: assumed here, and it is a lane field an operator declares — not a lane name, not a
+#: vertical, not an org. A skill that names its signal-kind field something else simply
+#: gets no class, which is the same as today; make this configurable when one does.
+SIGNAL_TYPE_FIELD = "signal_type"
+
+
+def _attach_signal_class(row: dict[str, Any]) -> None:
+    """Add a canonical ``signal_class`` beside a row's free-text ``signal_type``.
+
+    **Additive and non-destructive.** ``signal_type`` is untouched and nothing reads
+    ``signal_class`` yet — this exists so the closed enum is populated and verifiable
+    BEFORE any scoring depends on it, which is the whole reason it ships as its own step.
+
+    **Why the raw field cannot be scored directly.** The model wrote **54 distinct
+    phrasings across 72 signal rows** on run 741b7b3b, against six hand-guessed keys:
+    ``workforce stress event`` matched and ``workforce_stress`` did not, so the same
+    signal earned credit or nothing depending on which spelling came back. The 25-point
+    switching-signal factor scored **0 on 17 of 24 leads** while all 24 carried a
+    populated ``signal_type``.
+
+    🔴 ``None`` is written as no key at all, never as a class. An unrecognised phrasing
+    must stay distinguishable from a recognised one, or the midpoint-and-log rule the
+    scoring band depends on has nothing to test.
+    """
+    raw = row.get(SIGNAL_TYPE_FIELD)
+    if not str(raw or "").strip():
+        return
+    cls = classify(raw)
+    if cls:
+        row["signal_class"] = cls
 
 
 def enrich_prospects(

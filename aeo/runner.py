@@ -80,6 +80,7 @@ from aeo.phases.query_expansion import (  # noqa: E402
     unexpanded_placeholders,
 )
 from aeo.phases.ai_judgment import judge_prospects
+from aeo.phases.score_explanation import explain_scores
 from aeo.phases.enrichment import enrich_prospects  # noqa: E402
 from aeo.phases.validation import surviving_ids, validate_prospects  # noqa: E402
 from aeo.phases.zip_discovery import (  # noqa: E402
@@ -455,6 +456,19 @@ def _pin_completeness_fields(tool_context: dict[str, Any]) -> None:
     # `or canonical` guards the degenerate case of a source whose ONLY fields are the
     # pair we appended: an empty denominator scores 0 for everyone, silently.
     completeness["fields"] = scored or canonical
+
+
+#: True when this run scores with the gated floor-plus-bonus model.
+#:
+#: Read from the same place the engine reads it, so the two cannot disagree about
+#: which model a run is using — a disagreement here would ask the judge for an
+#: adjustment the scorer ignores, or skip an explanation the scorer produced a
+#: breakdown for.
+def _is_gated(tool_context: dict[str, Any]) -> bool:
+    scoring = tool_context.get("scoring")
+    if not isinstance(scoring, dict):
+        return False
+    return str(scoring.get("model") or "").strip().lower() == "gated"
 
 
 def _resolve_signal_fields(
@@ -981,6 +995,11 @@ def main() -> int:
             )
             judgments = judge_prospects(
                 prospects,
+                # 🔴 The gated model drops `ai_adjustment` from the total, so asking
+                # for it there spends tokens on a term nothing reads. Every LEGACY
+                # skill still scores with it, which is why this is a flag and not a
+                # deletion — see `_FIT_SECTION` in ai_judgment.py.
+                request_adjustment=not _is_gated(tool_context),
                 pipeline=pipeline_vocab,
                 product_description=tool_context.get("product_description") or "",
                 today=str(today),
@@ -1015,6 +1034,33 @@ def main() -> int:
         _log(f"scoring {len(prospects)} prospect(s)")
         scored = als.score_prospects(prospects, tool_context, today=today)
         _log(f"scored {len(scored)} prospect(s)")
+
+        # ── why this lead scored what it scored ─────────────────────────
+        #
+        # 🔑 AFTER scoring, and that is the entire fix. `ai_analysis` reads as nonsense
+        # because it is written in the judgment phase BEFORE the score exists and is
+        # never handed it — its prompt literally says "Stay stage reasoning". A model
+        # asked to explain a number it has not seen cannot do it.
+        #
+        # Gated skills only: a legacy prospect has no breakdown to explain from, so the
+        # pass skips it and spends nothing. Non-grounded, so it costs no search quota.
+        if _is_gated(tool_context) and scored:
+            explanations = explain_scores(
+                scored,
+                provider=provider,
+                provider_config=provider_config,
+                emit=sink.emit,
+            )
+            for item in scored:
+                text = explanations.get(str(item.get("prospect_id") or item.get("id")))
+                # Absent stays ABSENT. A rejected explanation renders as none, which is
+                # honest; a fallback string would be indistinguishable from a real one.
+                if text:
+                    item["score_explanation"] = text
+            _log(
+                f"explained {len(explanations)}/{len(scored)} prospect(s); "
+                f"{len(scored) - len(explanations)} had no usable explanation"
+            )
 
         # The model's reasoning onto the scored item, so it reaches
         # `prospects.ai_analysis` through `SCORED_PASSTHROUGH`. The engine puts the

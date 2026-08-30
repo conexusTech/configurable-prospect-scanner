@@ -78,6 +78,17 @@ SCORED_PASSTHROUGH = (
     # rejects the WHOLE scored callback).
     "disqualified",
     "disqualifier_reason",
+    # Added 2026-08-31 with the gated model, and this tuple nearly took its SIXTH
+    # omission: the explanation is a model call per prospect, so leaving it out would
+    # have paid for a paragraph on every scored lead and dropped all of them one line
+    # before the wire — the same shape as `ai_analysis`, `signal_event` and
+    # `disqualified` before it, and caught the same way, by checking rather than
+    # assuming.
+    #
+    # ⚠️ AEO must declare `score_explanation` on `ScanScoredItemDto` BEFORE this ships:
+    # `forbidNonWhitelisted` is global, so emitting a field the gateway does not know
+    # rejects the WHOLE scored callback, not just the field. Gateway first, always.
+    "score_explanation",
     "priority_band",
 )
 
@@ -213,7 +224,21 @@ def map_scored_event(event: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         mapped.append(out)
 
-    return [{"data": batch} for batch in _chunk(mapped)]
+    # 🔴 Declare which resolver placed this run's stages, on EVERY scored batch.
+    #
+    # AEO cannot infer this. An older scanner's `calculate_pipeline` value and this
+    # build's ported resolver are indistinguishable on the wire — both arrive with
+    # `pipeline_source` absent or `derived` — so without an explicit marker the gateway
+    # has to treat "no date" as ambiguous forever, and aeo-frontend has to use caption
+    # copy that under-claims on every derived row.
+    #
+    # A CONSTANT, not a config read: this build always resolves stages before scoring
+    # (`_pipeline_from_stage_resolver`), so the fact it states is a property of the
+    # BUILD. Deriving it from config would let a config edit misreport what the code
+    # actually did. AEO stamps it set-once, so repeating it per batch is free.
+    return [
+        {"data": batch, "stage_resolver": "scanner"} for batch in _chunk(mapped)
+    ]
 
 
 def map_zip_codes_event(event: dict[str, Any]) -> list[dict[str, Any]]:

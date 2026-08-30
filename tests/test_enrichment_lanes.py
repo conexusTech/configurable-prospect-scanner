@@ -85,11 +85,19 @@ class TestManyLanes:
             lanes = entry["lanes"]
             assert set(lanes) == {"in_market_signals", "incumbent"}
             assert len(lanes["in_market_signals"]) == 2
+            # `signal_class` is added beside the free-text `signal_type` (2026-08-31).
+            # Asserted as an exact dict deliberately: the point of the canonical class is
+            # that it is PRESENT and CORRECT, and a subset check would pass just as well
+            # if it silently stopped being emitted.
             assert lanes["in_market_signals"][0] == {
                 "signal_type": "Benefits Renewal",
                 "signal_date": "2025-08-04",
                 "source": "https://example.gov/board",
+                "signal_class": "benefits_change",
             }
+            # A lane with no `signal_type` field gains nothing — the enrichment keys on
+            # the field, not on the lane, so a vertical that has no switching signal is
+            # untouched rather than given an empty class.
             assert lanes["incumbent"] == [
                 {"incumbent_type": "standalone", "provider_name": "Acme"}
             ]

@@ -52,6 +52,18 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+# ⚠️ VENDORED-ENGINE ADDITION — see UPSTREAM.md. AEO's stage resolver, ported so an
+# unjudged prospect is scored against the same rung it is displayed under.
+from aeo.customer_stage import (
+    collect_signal_dates,
+    extract_customer_stage_defs,
+    extract_signal_fields,
+    resolve_with_evidence,
+    resting_stage,
+)
+from aeo.gated_score import score as gated_score
+from aeo.signal_class import classify
+
 log = logging.getLogger("av_lead_scanner")
 
 # UUID namespace for deterministic prospect IDs (RFC-4122 NAMESPACE_URL).
@@ -2371,6 +2383,251 @@ def _pipeline_from_judgment(
     }
 
 
+def _rank_key(item: dict[str, Any]) -> tuple:
+    factors = item.get("score_factors") or {}
+    gated = factors.get("gated") or {}
+    bands = gated.get("bands") or {}
+    return (
+        item.get("score") or 0,
+        # Under the gated model these come from the breakdown. Under the legacy
+        # model they are absent and every prospect scores 0 here, which collapses
+        # the cascade to score -> company_name — still total, still reproducible,
+        # and unchanged in ordering for anything that was not already tied.
+        bands.get("signal_strength", 0),
+        bands.get("signal_recency", 0),
+        bands.get("company_size", 0),
+        bands.get("confirmed_contact", 0),
+        # Reversed below, so negate the name to keep A before Z inside a tie.
+        _NameDesc(str(item.get("company_name") or "")),
+    )
+
+
+class _NameDesc:
+    """A company name that sorts A→Z inside a `reverse=True` sort.
+
+    The rank cascade sorts descending — higher score first — but the final tiebreak must
+    read alphabetically, or two otherwise-identical prospects appear in reverse
+    alphabetical order for no reason a user could explain. Inverting the comparison here
+    keeps the whole key in one `sort` call rather than splitting it into two passes.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+    def __eq__(self, other: object) -> bool:  # pragma: no cover - trivial
+        return isinstance(other, _NameDesc) and self.value == other.value
+
+    def __lt__(self, other: "_NameDesc") -> bool:
+        return self.value > other.value
+
+
+def _pipeline_from_stage_resolver(
+    lead: dict[str, Any],
+    ctx: dict[str, Any],
+    cfg: dict[str, Any],
+    today: date,
+) -> dict[str, Any] | None:
+    """The gateway's own stage fallback, run HERE so the score matches the label.
+
+    ⚠️ **VENDORED-ENGINE ADDITION** — see UPSTREAM.md.
+
+    Sits between the judgment and `calculate_pipeline`. It runs only for a prospect the
+    judge could not judge (~1% on a healthy run), and only for a `customer` skill.
+
+    **Why it exists.** AEO re-derives a customer skill's stage whenever this engine's
+    marker is absent, because `calculate_pipeline` is months-to-DECISION arithmetic
+    carrying a construction lead time — right for a project skill, wrong for a benefits
+    broker. The engine then scored the pipeline axis from ITS stage while AEO displayed
+    the re-derived one. Measured on run 741b7b3b, groninger USA::
+
+        pipeline_status = "1 - Early Discovery"   <- displayed (AEO-derived)
+        pipeline_timing = 2                        <- scored ("7 - Too Late")
+
+    Resolving the same way AEO does, before scoring, closes that gap: one stage, scored
+    and displayed. `aeo/customer_stage.py` is a faithful port of AEO's
+    `customer-pipeline-stage.util.ts` — **if a label ever differs, the PORT is wrong.**
+
+    Returns ``None`` to fall through to `calculate_pipeline`: for a project skill (whose
+    arithmetic AEO trusts and keeps), or when no vocabulary reached us.
+    """
+    # AEO keeps a project skill's engine-derived stage, so re-deriving here would change
+    # a stage AEO would have accepted. Absent => customer: every live skill is one, and
+    # an older gateway does not send the field at all.
+    if str(ctx.get("skill_type") or "customer").lower() == "project":
+        return None
+
+    vocab = ctx.get("pipeline")
+    defs = extract_customer_stage_defs(vocab)
+    if not defs:
+        return None
+
+    signal_fields = extract_signal_fields(vocab)
+    dates = collect_signal_dates(lead.get("discovery_data"), signal_fields)
+    # 🔑 EXACTLY the three fields AEO used — email, phone, linkedin. **Not
+    # `contact_name`**, which is deliberate on their side and easy to "improve" here:
+    # a name is not a way to reach anyone, and `requires_contact` rungs mean reachable.
+    # A first cut of this port read name/email/phone, which diverges on any
+    # contact-gated rung. The shared TIMELINE ladder declares none, so nothing today
+    # would have caught it.
+    has_contact = any(
+        str(lead.get(k) or "").strip()
+        for k in ("contact_email", "contact_phone", "contact_linkedin")
+    )
+
+    stage, banded = resolve_with_evidence(defs, dates, has_contact, today)
+    if not stage:
+        stage, banded = resting_stage(defs), None
+    if not stage:
+        return None
+
+    # Same weight lookup as the judged path, so the axis cannot disagree with the rung
+    # depending on which branch produced it.
+    score: Any = None
+    for entry in cfg.get("statuses") or []:
+        if len(entry) >= 4 and entry[2] == stage:
+            score = entry[4] if len(entry) > 4 else 0
+            break
+    try:
+        score = int(score) if score is not None else 0
+    except (TypeError, ValueError):
+        score = 0
+
+    # 🔴 **Say which of the two things happened, and do not overstate either.**
+    #
+    # An earlier version of this returned "resolved from the prospect's dated discovery
+    # signals" unconditionally — untrue whenever no date was banded, which for MYgroup is
+    # EVERY prospect, because their `discovery_data` carries no timing fields at all.
+    # That is the same defect the redesign exists to remove (a missing input rendering as
+    # a confident value), reintroduced by the sentence describing the fix.
+    #
+    # `signal_date` is emitted ONLY when a real date decided the rung, which gives AEO
+    # and the frontend a true discriminator on a `derived` row: a date present means
+    # arithmetic happened, absent means we had nothing and rested. Previously only
+    # `ai_judgment` ever set this field, so an unjudged row had none either way.
+    out: dict[str, Any] = {
+        "pipeline_status": stage,
+        # No `pipeline_source` key: absent == derived, which is exactly what this is.
+        # AEO reads the absence and keeps the stage rather than re-deriving it, because
+        # the value it would compute is now the value it is already looking at.
+        "months_to_decision": None,
+        "estimated_completion": "Unknown",
+        "estimated_decision": "Unknown",
+        "score": min(max(score, 0), int(cfg.get("max", 30))),
+    }
+    if banded is not None:
+        out["signal_date"] = banded.isoformat()
+        out["pipeline_detail"] = (
+            f"Stage resolved from a dated discovery signal ({banded.isoformat()}), "
+            "banded against the skill's own vocabulary."
+        )
+    else:
+        out["pipeline_detail"] = (
+            "No dated discovery signal was found, so the prospect rests at the "
+            "vocabulary's entry rung. Nothing was measured."
+        )
+    return out
+
+
+#: Where a skill's switching signals live inside `validation_data`. «PER-SKILL», not
+#: «TEMPLATE» — measured 2026-08-31: healthcare carries `switching_signal` on 68 of 69
+#: scored prospects, and the other four verticals carry **none**, using `signals_found`
+#: instead. A default is supplied because the healthcare skill is the only one whose data
+#: supports the gate today; the other four need dated signals before this key matters.
+DEFAULT_SIGNAL_SOURCE = "switching_signal"
+
+
+def _gated_total(
+    lead: dict[str, Any],
+    prospect: dict[str, Any],
+    pipeline: dict[str, Any],
+    scoring: dict[str, Any],
+    cap: int,
+    today: date,
+) -> tuple[int, dict[str, Any]] | None:
+    """``(total, breakdown)`` under the gated model, or ``None`` to use the legacy sum.
+
+    ⚠️ **VENDORED-ENGINE ADDITION** — see UPSTREAM.md.
+
+    🔴 **Returns `None` for every skill that has not opted in, and that is the whole
+    safety property.** All five live skills are scored by the legacy sum; this must not
+    change any of them until a config says so.
+    """
+    if str(scoring.get("model") or "").strip().lower() != "gated":
+        return None
+
+    validation = prospect.get("validation_data")
+    source = str(scoring.get("signal_source") or DEFAULT_SIGNAL_SOURCE)
+    raw = (validation or {}).get(source) if isinstance(validation, dict) else None
+    signals = [s for s in (raw or []) if isinstance(s, dict)]
+
+    # Classify here rather than trusting the row: `signal_class` is attached at
+    # enrichment from 2026-08-31, so rows written before that carry only the free text.
+    # Re-deriving costs nothing and makes the model independent of when a row was written.
+    signals = [
+        dict(s, signal_class=s.get("signal_class") or classify(s.get("signal_type")))
+        for s in signals
+    ]
+
+    # 🔑 The gate reads its OWN alias table, falling back to `region_bonus`'s.
+    #
+    # A first cut read `region_bonus.state_aliases` only — coupling the gate to a LEGACY
+    # AXIS the gated model does not score at all, so a skill that dropped `region_bonus`
+    # (reasonably, since the gate replaces it) would silently lose the normalisation and
+    # fail G1 for every lead. The fallback is kept because every live skill has the table
+    # there today and a gate that fails closed is the worst failure this model has.
+    target_cfg = (scoring.get("gate") or {}).get("target_market") or {}
+    aliases = target_cfg.get("state_aliases") or (
+        (scoring.get("region_bonus") or {}).get("state_aliases") or {}
+    )
+
+    breakdown = gated_score(
+        lead,
+        signals,
+        pipeline.get("pipeline_status"),
+        {**scoring, "score_cap": cap},
+        aliases,
+        today,
+    )
+    return breakdown["total"], breakdown
+
+
+def _dated_calculate_pipeline(
+    lead: dict[str, Any], cfg: dict[str, Any], today: date
+) -> dict[str, Any]:
+    """Tier 3, with the same "did we actually measure something" evidence as tier 2.
+
+    ⚠️ **VENDORED-ENGINE ADDITION** — a wrapper, so `calculate_pipeline` itself stays
+    byte-for-byte upstream.
+
+    🔴 **Why this exists — aeo-frontend caught the gap, and it is the tier the emission
+    change did not reach.** Their `derived` chip reads "Placed by measuring how long ago
+    the event was", and the agreed rule is that an absent `signal_date` on a
+    `stage_resolver = 'scanner'` run means *nothing was measured*. `calculate_pipeline`
+    has a **dated branch** — it reads a date from `timing_fields`, derives a completion
+    and a decision month, and returns `months_to_decision` — while emitting no
+    `signal_date` at all. A prospect placed by that branch would have told the operator
+    nothing was measured about a row where something was: the same over-claim, arriving
+    through the one path the fix skipped.
+
+    `months_to_decision is not None` is exactly the dated branch — the other three
+    return `None` for it and `"Unknown"` for both estimates — so it identifies the case
+    without re-reading the lead or duplicating the date logic.
+
+    🔑 **`estimated_completion` is a COMPLETION month, not an event date**, which is the
+    project semantics tier 3 exists for. It is surfaced as the evidence because it is the
+    date that was actually measured; the frontend renders it as the thing the placement
+    was worked out from, which is true of both tiers.
+    """
+    out = calculate_pipeline(lead, cfg, today)
+    if out.get("months_to_decision") is not None:
+        completion = str(out.get("estimated_completion") or "").strip()
+        if completion and completion.lower() != "unknown":
+            out["signal_date"] = completion
+    return out
+
+
 def calculate_pipeline(lead: dict[str, Any], cfg: dict[str, Any], today: date) -> dict[str, Any]:
     lead_months = int(cfg["decision_lead_months"])
     # Which field carries the timing signal is the SKILL's business, not ours. This read
@@ -2489,21 +2746,32 @@ def score_prospects(
     # behaviour is to clamp at `score_cap`, so refusing to run would reject configs that
     # score correctly. Silence is the actual hazard — a skill whose axes sum to 60 can
     # never produce a top-band prospect, and nothing anywhere says so.
-    try:
-        budget = sum(int(_deep_get(scoring, a).get("max", 0) or 0) for a in _BUDGET_AXES)
-        if has_factors:
-            budget += int(
-                (f_cfg.get("max", 25) if legacy_factor_axis else factors_max_cfg) or 0
+    #
+    # ⚠️ **Skipped entirely under `model: gated`, because it measures the wrong thing
+    # there.** The gated model does not sum these axes — the total is a floor plus four
+    # bonus bands — so the axes legitimately do not add up to `score_cap` and the warning
+    # fires on every correctly-authored gated config. An advisory that is guaranteed
+    # wrong is worse than none: it trains an operator to ignore the line that would have
+    # told them something real. The gated equivalent (bonus.max vs cap - floor) belongs
+    # in the config lint, where the whole shape is available.
+    if str(scoring.get("model") or "").strip().lower() != "gated":
+        try:
+            budget = sum(
+                int(_deep_get(scoring, a).get("max", 0) or 0) for a in _BUDGET_AXES
             )
-            if legacy_factor_axis:
-                budget -= int(f_cfg.get("max", 25) or 0)  # borrowed, not additional
-        if budget != cap:
-            _log_from(ctx)(
-                f"scoring: axis budget {budget} != score_cap {cap} — "
-                f"{'unreachable top band' if budget < cap else 'clamped at cap'}"
-            )
-    except (TypeError, ValueError, AttributeError):
-        pass
+            if has_factors:
+                budget += int(
+                    (f_cfg.get("max", 25) if legacy_factor_axis else factors_max_cfg) or 0
+                )
+                if legacy_factor_axis:
+                    budget -= int(f_cfg.get("max", 25) or 0)  # borrowed, not additional
+            if budget != cap:
+                _log_from(ctx)(
+                    f"scoring: axis budget {budget} != score_cap {cap} — "
+                    f"{'unreachable top band' if budget < cap else 'clamped at cap'}"
+                )
+        except (TypeError, ValueError, AttributeError):
+            pass
 
     # ── org-sourced values ────────────────────────────────────────────────────
     # Anything the engine needs that the skill config does not carry comes from the
@@ -2595,8 +2863,16 @@ def score_prospects(
         # `calculate_pipeline` itself is untouched: it stays the fallback for a prospect
         # the judge did not reach, so a failed model call degrades to today's behaviour
         # rather than to nothing.
-        pipeline = _pipeline_from_judgment(p, p_cfg) or calculate_pipeline(
-            lead, p_cfg, today
+        #
+        # 🔑 THREE tiers now, not two. The middle one is AEO's own resolver, ported —
+        # see `_pipeline_from_stage_resolver`. Order is load-bearing: the judge wins,
+        # then the resolver AEO would otherwise have run at persistence, and only then
+        # the date ladder. Without the middle tier the engine scores a customer skill's
+        # unjudged prospect on a stage AEO is about to throw away.
+        pipeline = (
+            _pipeline_from_judgment(p, p_cfg)
+            or _pipeline_from_stage_resolver(lead, ctx, p_cfg, today)
+            or _dated_calculate_pipeline(lead, p_cfg, today)
         )
         # Ruled out BEFORE any factor work: a disqualified prospect costs nothing to
         # score, and cannot end up recorded as both strongly-fitting and excluded.
@@ -2642,9 +2918,25 @@ def score_prospects(
         except (TypeError, ValueError):
             ai_adj = 0
 
-        total = max(
-            0, min(cap, completeness + fit + factors_pts + region + multi + timing + ai_adj)
-        )
+        # ⚠️ **VENDORED-ENGINE EDIT** — logged in UPSTREAM.md's edit table.
+        #
+        # 🔴 **The gated model, and the ONLY branch that reaches it.** Absent
+        # `scoring.model: gated` the legacy additive path below runs byte-for-byte
+        # unchanged — asserted by a test, because "opt-in" is a claim about code nobody
+        # re-reads and the five live skills all depend on it.
+        #
+        # Why a branch and not a rewrite: every one of those skills is scored by the sum
+        # below today, and switching a customer over is a config edit per skill, made
+        # deliberately. See the rollout in docs/prospect-scoring-redesign.md §11.
+        gated = _gated_total(lead, p, pipeline, scoring, cap, today)
+        if gated is not None:
+            total, gated_breakdown = gated
+        else:
+            gated_breakdown = None
+            total = max(
+                0,
+                min(cap, completeness + fit + factors_pts + region + multi + timing + ai_adj),
+            )
         # The clamp above is applied AFTER `ai_adj`, deliberately: a base of 95 plus a +15
         # adjustment must land at `cap`, not above the top band, or the band lookup falls
         # off the end of the table and the best prospect in the run renders unbanded.
@@ -2740,6 +3032,21 @@ def score_prospects(
                 # Per-factor credit for the skill's own authored factors, so an operator
                 # can see WHICH of their criteria a prospect met.
                 **({"factors": factor_detail} if factor_detail else {}),
+                # 🔴 The gated breakdown, present ONLY under `model: gated`.
+                #
+                # Additive by construction: a legacy row's `score_factors` is byte-for-byte
+                # what it was, because this key is absent. That matters more than it looks
+                # — AEO's `assessFactorHealth` reads `score_factors.factors`, and a shape
+                # change on the legacy path would have broken it silently for all five
+                # live skills.
+                #
+                # ⚠️ The axis keys ABOVE are still emitted under the gated model and are
+                # still the legacy components. They no longer sum to `total` and nothing
+                # should treat them as if they do — `gated` is the whole answer when it is
+                # present. Kept rather than suppressed so a run can be compared against
+                # its own legacy scoring during the cutover, which is the one window where
+                # having both is worth the ambiguity.
+                **({"gated": gated_breakdown} if gated_breakdown else {}),
             },
             "ai_score_adjustment": ai_adj,
             **({"disqualified": disqualified} if disqualified is not None else {}),
@@ -2751,7 +3058,25 @@ def score_prospects(
             ),
         })
 
-    scored.sort(key=lambda x: x["score"], reverse=True)
+    # ⚠️ **VENDORED-ENGINE EDIT** — logged in UPSTREAM.md's edit table.
+    #
+    # 🔴 **`rank` is where CALL ORDER lives, and a single-key sort could not carry it.**
+    # This was `sort(key=lambda x: x["score"])`. Python's sort is stable, so tied
+    # prospects kept whatever order discovery happened to produce — which **changes
+    # between runs of the same data**. Measured on run 741b7b3b: 4 score ties covering
+    # **8 of 24 prospects**, every one of them free to reorder on a re-scan.
+    #
+    # That was survivable while scores were spread 20-73. It is not under the gated
+    # model, where the qualified set compresses into a 20-point band by design: 17
+    # prospects cannot be pairwise separated in 20 points (that needs 2 x 16 = 32), so
+    # ties get MORE common, not less, and rank becomes the only thing that answers
+    # "who do I call first".
+    #
+    # The cascade is the score's own components in the order a salesperson would weigh
+    # them, ending on `company_name` purely so the order is TOTAL — two prospects
+    # identical on every signal must still rank deterministically, or the instability
+    # this fixes returns for exactly the rows most likely to be tied.
+    scored.sort(key=_rank_key, reverse=True)
     for rank, item in enumerate(scored, 1):
         item["rank"] = rank
     return scored

@@ -410,3 +410,49 @@ class TestWhitelistParity:
 
         assert "ai_analysis" in SCORED_PASSTHROUGH
         assert "ai_score_adjustment" in SCORED_PASSTHROUGH
+
+
+class TestStageResolverMarker:
+    """The run-level declaration AEO cannot infer.
+
+    🔴 An older scanner's `calculate_pipeline` value and this build's ported resolver are
+    indistinguishable on the wire — both arrive with `pipeline_source` absent or
+    `derived`. Without this marker the gateway must treat "no signal date" as permanently
+    ambiguous, and aeo-frontend has to caption every `derived` row with copy that
+    under-claims.
+    """
+
+    def _scored(self, n=1):
+        return {
+            "type": "scored",
+            "items": [
+                {"prospect_id": f"p{i}", "company_name": f"C{i}", "score": 90}
+                for i in range(n)
+            ],
+        }
+
+    def test_every_scored_batch_declares_the_resolver(self):
+        # Asserting the batch COUNT first, deliberately: a bare `for ... assert` over an
+        # empty list passes vacuously, which is how the first draft of this test reported
+        # green against a fixture that produced no batches at all.
+        from aeo.event_mapping import map_scored_event
+
+        payloads = map_scored_event(self._scored(3))
+        assert len(payloads) >= 1
+        assert all(p["stage_resolver"] == "scanner" for p in payloads)
+
+    def test_it_is_a_constant_not_read_from_config(self):
+        # It states a property of the BUILD — this code always resolves stages before
+        # scoring. Deriving it from config would let a config edit misreport what the
+        # code actually did.
+        from aeo.event_mapping import map_scored_event
+
+        out = map_scored_event(self._scored(1))
+        assert out[0]["stage_resolver"] == "scanner"
+
+    def test_the_data_payload_is_otherwise_unchanged(self):
+        from aeo.event_mapping import map_scored_event
+
+        out = map_scored_event(self._scored(2))
+        assert [d["prospect_id"] for d in out[0]["data"]] == ["p0", "p1"]
+        assert set(out[0]) == {"data", "stage_resolver"}
