@@ -189,3 +189,103 @@ class TestMergeIntoScored:
     def test_ignores_a_patch_for_an_unknown_prospect(self):
         scored = [{"prospect_id": "p1"}]
         assert merge_into_scored(scored, {"ghost": {"contact_name": "X"}}) == scored
+
+
+class TestContactsAreBatched:
+    """§4 of the bundling ruling: contact search batches at 6, one call per batch.
+
+    🔴 Batching's real risk is not cost, it is CROSS-CONTAMINATION — the model stops
+    treating entities as distinct records and gives one company another's contact. A
+    cheaper phase that attributes the wrong person to a prospect is worse than the
+    expensive one, so the per-entity attribution test below matters more than the
+    call-count test beside it.
+    """
+
+    @staticmethod
+    def _many(n: int) -> list[dict]:
+        return [
+            {"id": f"p{i}", "company_name": f"Co {i}", "city": "Austin", "state": "TX"}
+            for i in range(n)
+        ]
+
+    @staticmethod
+    def _batched_provider():
+        """Answers per entity, reading the numbered list back out of the prompt."""
+
+        def call(prompt, **kwargs):
+            call.prompts.append(prompt)
+            names = []
+            for line in prompt.splitlines():
+                line = line.strip()
+                if line and line[0].isdigit() and "name: " in line:
+                    names.append(line.split("name: ", 1)[1].split(";")[0].strip())
+            return json.dumps(
+                [
+                    {
+                        "n": i,
+                        "company_name": n,
+                        "contact_name": f"Contact for {n}",
+                        "contact_email": f"{n.replace(' ', '').lower()}@example.org",
+                    }
+                    for i, n in enumerate(names, 1)
+                ]
+            )
+
+        call.prompts = []
+        return call
+
+    def test_one_call_per_batch_of_six(self):
+        provider = self._batched_provider()
+        find_contacts(
+            self._many(13), contacts_config={}, product_description="x",
+            provider=provider, provider_config={}, parse_json_array=_parse,
+        )
+        # ceil(13 / 6) = 3. Unbatched this was 13.
+        assert len(provider.prompts) == 3
+
+    def test_each_prospect_gets_ITS_OWN_contact(self):
+        provider = self._batched_provider()
+        out = find_contacts(
+            self._many(8), contacts_config={}, product_description="x",
+            provider=provider, provider_config={}, parse_json_array=_parse,
+        )
+        assert len(out) == 8
+        for i in range(8):
+            assert out[f"p{i}"]["contact_name"] == f"Contact for Co {i}", (
+                "a prospect received another prospect's contact — the failure batching "
+                "makes possible"
+            )
+
+    def test_a_short_response_is_reported_not_silently_empty(self):
+        """§5.5 — a target with no object searched and got nothing BACK."""
+
+        def call(prompt, **kwargs):
+            call.prompts.append(prompt)
+            return json.dumps([{"n": 1, "company_name": "Co 0",
+                                "contact_name": "Only One"}])
+
+        call.prompts = []
+        events: list[dict] = []
+        out = find_contacts(
+            self._many(5), contacts_config={}, product_description="x",
+            provider=call, provider_config={}, parse_json_array=_parse,
+            emit=events.append,
+        )
+        miss = next(e for e in events if e["type"] == "contacts_unmatched")
+        assert miss["prospects"] == 4 and miss["of"] == 5
+        # The one that came back is still used; the rest are empty patches, not absent.
+        assert out["p0"]["contact_name"] == "Only One"
+        assert set(out) == {f"p{i}" for i in range(5)}
+
+    def test_the_numbered_list_and_output_rules_reach_the_prompt(self):
+        provider = self._batched_provider()
+        find_contacts(
+            self._many(3), contacts_config={}, product_description="x",
+            provider=provider, provider_config={}, parse_json_array=_parse,
+        )
+        prompt = provider.prompts[0]
+        assert "1. name: Co 0" in prompt and "3. name: Co 2" in prompt
+        assert "exact official name and NOTHING else" in prompt
+        assert "IN THE SAME ORDER" in prompt
+        # The phase's own non-negotiable survives batching.
+        assert "Do not guess or construct an email address" in prompt

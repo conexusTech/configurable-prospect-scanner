@@ -27,6 +27,13 @@ from __future__ import annotations
 import re
 from typing import Any, Callable
 
+from aeo.phases._batching import (
+    BATCH_OUTPUT_RULES,
+    CONTACT_BATCH,
+    chunk,
+    numbered_input,
+    reconcile,
+)
 from aeo.phases._concurrent import (
     DEFAULT_CALL_TIMEOUT_S,
     PHASE_RETRY_ATTEMPTS,
@@ -45,11 +52,11 @@ CONTACT_COLUMNS = (
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
 
-_PROMPT = """Identify the best decision-maker to contact at this organization for
-the seller described below.
+_PROMPT = """Identify the best decision-maker to contact at each organization below,
+for the seller described.
 
-ORGANIZATION
-{prospect}
+ORGANIZATIONS — {count} of them, numbered. Report on every one.
+{prospects}
 
 WHAT THE SELLER OFFERS
 {product}
@@ -66,10 +73,18 @@ THE SELLER'S CONTACT PREFERENCES
 Use grounded public sources. **Do not guess or construct an email address**: if you
 cannot find one stated publicly, leave it empty. Never invent a person.
 
-Return a JSON array with exactly one object:
-[{{"contact_name": "", "contact_title": "", "contact_email": "",
-   "contact_phone": "", "contact_linkedin": "", "source_url": "",
-   "confidence": "high|medium|low"}}]
+OUTPUT
+Return a JSON array of exactly {count} objects, one per organization:
+
+{{
+  "n": <the organization's number from the list above>,
+  "company_name": "<its exact official name, copied from the list>",
+  "contact_name": "", "contact_title": "", "contact_email": "",
+  "contact_phone": "", "contact_linkedin": "", "source_url": "",
+  "confidence": "high|medium|low"
+}}
+
+{rules}
 
 Leave any field empty when you cannot support it. Return only the JSON array."""
 
@@ -128,13 +143,26 @@ def find_contacts(
 
     targets = [p for p in prospects if p.get("id")]
 
-    def _search(prospect: dict[str, Any]) -> dict[str, Any]:
+    # 🔴 **6 organizations per call, not one.** The bundling ruling §4
+    # prices contact search separately from other single-signal phases — one group but
+    # heavier per entity — so it batches at 6 rather than 8. On the reference run this
+    # phase spent 50 grounded calls on 50 targets; batched it spends 9.
+    #
+    # ⚠️ It does NOT fuse with `enrichment`, and that is deliberate: contacts runs AFTER
+    # scoring on a top-N cut while enrichment runs BEFORE it on validation survivors.
+    # Different entity sets at different points, so §3 fusion does not apply — only §4
+    # batching does.
+    batches = chunk(targets, CONTACT_BATCH)
+
+    def _search(batch: list[dict[str, Any]]) -> list[dict[str, Any] | None]:
         prompt = _PROMPT.format(
-            prospect=_prospect_summary(prospect),
+            count=len(batch),
+            prospects=numbered_input(batch, _prospect_summary),
             product=product_description or "(not specified)",
             titles=titles,
             seniorities=seniorities,
             preferences=preferences,
+            rules=BATCH_OUTPUT_RULES.format(name_key="company_name"),
         )
         raw = provider(
             prompt,
@@ -145,17 +173,30 @@ def find_contacts(
             timeout_s=DEFAULT_CALL_TIMEOUT_S,
             phase="contacts",
         )
-        parsed = parse_json_array(raw)
-        return parsed[0] if parsed else {}
+        return reconcile(batch, parse_json_array(raw) or [])
 
     # Bounded + timeout-enforced — the provider ignores `timeout_s`, so a sequential
     # loop has no upper bound. See aeo/phases/_concurrent.py.
-    found_results = map_bounded(
-        targets,
+    batch_results = map_bounded(
+        batches,
         _search,
         max_concurrency=concurrency_from(provider_config),
         timeout_s=DEFAULT_CALL_TIMEOUT_S,
     )
+
+    # Flatten back to one result per target, positionally. A failed batch yields None
+    # from `map_bounded`; every target in it gets an empty patch rather than becoming a
+    # missing key that reads as "never searched".
+    found_results: list[dict[str, Any] | None] = []
+    unmatched = 0
+    for batch, matched in zip(batches, batch_results):
+        rows = matched or [None] * len(batch)
+        for row in rows:
+            if not isinstance(row, dict):
+                unmatched += 1
+                found_results.append(None)
+            else:
+                found_results.append(row)
 
     patches: dict[str, dict[str, Any]] = {}
     found = 0
@@ -190,6 +231,19 @@ def find_contacts(
         # Emitted even when empty: "searched and found nobody" is a different fact
         # from "never searched", and only the former should stop a retry.
         patches[prospect_id] = patch
+
+    # §5 rule 5: "do not let a batch of 8 silently return 5." A target with no object
+    # in the response searched and got nothing BACK, which is not the same fact as
+    # searching and finding nobody — and only the latter should stop a retry.
+    if unmatched and emit:
+        emit(
+            {
+                "type": "contacts_unmatched",
+                "prospects": unmatched,
+                "of": len(targets),
+                "batch_size": CONTACT_BATCH,
+            }
+        )
 
     if emit:
         emit({"type": "phase_complete", "phase": "contacts", "count": found})
