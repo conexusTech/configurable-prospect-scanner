@@ -29,6 +29,13 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from aeo.phases._batching import (
+    BATCH_OUTPUT_RULES,
+    batch_size_for,
+    chunk,
+    numbered_input,
+    reconcile,
+)
 from aeo.phases._concurrent import (
     DEFAULT_CALL_TIMEOUT_S,
     PHASE_RETRY_ATTEMPTS,
@@ -160,22 +167,6 @@ def _sources_block(lane: dict[str, Any]) -> str:
     return f"\nWHERE TO LOOK\n{listed}\n"
 
 
-#: Entities per fused call, by how many signal groups share the prompt.
-#:
-#: From the PO's bundling ruling §4. **5 is the only size measured for a multi-group fused
-#: prompt** — raising it on the assumption that bigger is cheaper is the failure the rule
-#: names explicitly: an oversized batch degrades SILENTLY, thinning results per entity and
-#: dropping entities from the response, and both look like "the data wasn't out there".
-#: §10 says re-measure at 5 / 8 / 10 before moving it.
-_BATCH_BY_GROUPS = {1: 8, 2: 6}
-_BATCH_MULTI_GROUP = 5
-
-
-def batch_size_for(group_count: int) -> int:
-    """Entities per fused call. See `_BATCH_BY_GROUPS`."""
-    return _BATCH_BY_GROUPS.get(max(1, int(group_count)), _BATCH_MULTI_GROUP)
-
-
 _FUSED_PROMPT = """You are enriching business prospects that a seller has already qualified.
 
 PROSPECTS — {count} of them, numbered. Report on every one.
@@ -203,31 +194,9 @@ numbered list above. Each object must be:
 {group_keys}
 }}
 
-Rules, all mandatory:
-- "company_name" contains the exact official name and NOTHING else. No parenthetical
-  annotation, no entity-type suffix, no echo of the input line's location or context.
-- Return an object for every prospect, including ones you found nothing for.
-- A group with no findings is an EMPTY ARRAY, never a missing key and never null.
-- Do not merge findings across prospects. A fact about prospect 3 belongs only to
-  prospect 3.
+{rules}
 
 Return only the JSON array."""
-
-
-def _numbered_prospects(batch: list[dict[str, Any]]) -> str:
-    """The numbered input list required by §5 rule 1.
-
-    Disambiguating context (location, website, how it was found) goes on the INPUT side
-    only — §5 rule 2 forbids it echoing back into the name field, and a production skill
-    shipped `"Hall County (County; Hall County, GA)"` in a name field for exactly this
-    reason, breaking every downstream name match until it was cleaned by hand.
-    """
-    sep = "; "
-    lines = []
-    for i, prospect in enumerate(batch, 1):
-        summary = _prospect_summary(prospect).replace(chr(10), sep)
-        lines.append(str(i) + ". " + summary)
-    return chr(10).join(lines)
 
 
 def _group_briefs(runnable: list[dict[str, Any]]) -> str:
@@ -258,52 +227,6 @@ def _group_briefs(runnable: list[dict[str, Any]]) -> str:
 def _group_key_lines(runnable: list[dict[str, Any]]) -> str:
     nl = chr(10)
     return ("," + nl).join('  "' + lane_key(lane) + '": [ ... ]' for lane in runnable)
-
-
-def _reconcile(
-    batch: list[dict[str, Any]],
-    parsed: list[dict[str, Any]],
-) -> list[dict[str, Any] | None]:
-    """Map each input prospect to its returned object. §5 rule 5.
-
-    🔴 **Order is the declared contract, but it is not trusted blindly.** §5 rule 3 says
-    one object per entity in input order, so position is the primary key — but only when
-    the model returned the right number of objects. Anything else falls back to matching
-    on name, and a miss is reported rather than silently becoming "found nothing":
-    *"do not let a batch of 8 silently return 5."*
-
-    Returns a list positionally aligned to `batch`, `None` where nothing matched.
-    """
-    objects = [o for o in parsed if isinstance(o, dict)]
-    out: list[dict[str, Any] | None] = [None] * len(batch)
-
-    if len(objects) == len(batch):
-        # The contract held. Position wins; `n` and name are checked by the caller.
-        return list(objects)
-
-    def norm(v: Any) -> str:
-        return "".join(ch for ch in str(v or "").lower() if ch.isalnum())
-
-    by_name = {}
-    for o in objects:
-        key = norm(o.get("company_name"))
-        if key and key not in by_name:
-            by_name[key] = o
-    for i, prospect in enumerate(batch):
-        hit = by_name.get(norm(prospect.get("company_name")))
-        if hit is not None:
-            out[i] = hit
-            continue
-        # `n` is the model's own index into the input list — a usable fallback when the
-        # name came back annotated despite the instruction not to.
-        for o in objects:
-            try:
-                if int(o.get("n")) == i + 1:
-                    out[i] = o
-                    break
-            except (TypeError, ValueError):
-                continue
-    return out
 
 
 def _coerce_rows(
@@ -414,17 +337,18 @@ def enrich_prospects(
     # describing one entity are mutually informative, and splitting them throws away
     # evidence the model would otherwise use.
     size = batch_size_for(len(runnable))
-    batches = [targets[i : i + size] for i in range(0, len(targets), size)]
+    batches = chunk(targets, size)
     keys = [lane_key(lane) for lane in runnable]
 
     def _run(batch: list[dict[str, Any]]) -> list[dict[str, Any] | None]:
         prompt = _FUSED_PROMPT.format(
             count=len(batch),
-            prospects=_numbered_prospects(batch),
+            prospects=numbered_input(batch, _prospect_summary),
             scan_date=scan_date,
             group_count=len(runnable),
             groups=_group_briefs(runnable),
             group_keys=_group_key_lines(runnable),
+            rules=BATCH_OUTPUT_RULES.format(name_key="company_name"),
         )
         raw = provider(
             prompt,
@@ -434,7 +358,7 @@ def enrich_prospects(
             timeout_s=DEFAULT_CALL_TIMEOUT_S,
             phase="enrichment",
         )
-        return _reconcile(batch, parse_json_array(raw) or [])
+        return reconcile(batch, parse_json_array(raw) or [])
 
     answers = map_bounded(
         batches,

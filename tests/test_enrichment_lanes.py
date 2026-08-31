@@ -360,9 +360,9 @@ class TestFusionActuallyReducesCalls:
         assert "exact official name and NOTHING else" in prompt
         # §5.3 one object per entity, in input order
         assert "IN THE SAME ORDER" in prompt
-        assert "including ones you found nothing for" in prompt
+        assert "even for entries you found nothing for" in prompt
         # §5.4 empty array, never omission
-        assert "EMPTY ARRAY, never a missing key" in prompt
+        assert "EMPTY, never a missing key" in prompt
 
     def test_a_short_response_is_REPORTED_not_silently_empty(self):
         """§5.5 — 'do not let a batch of 8 silently return 5'."""
