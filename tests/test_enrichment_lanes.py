@@ -47,22 +47,69 @@ PROSPECTS = [
 
 
 class FakeProvider:
-    """Answers per lane, so a lane asking the wrong question fails visibly."""
+    """Answers per lane AND per entity, so a lane asking the wrong question fails visibly.
+
+    🔑 **Updated for the fused call (bundling ruling §3).** The phase now sends ONE prompt
+    covering every prospect in the batch and every signal group, and expects one object per
+    prospect with a named array per group. A stub that ignored the prompt could not test
+    either half, so this fake:
+
+    - reads the NUMBERED INPUT LIST back out of the prompt, so a phase that failed to
+      number its entities gets nothing and the §5 rule-1 test fails rather than passing by
+      luck;
+    - answers a group only when that group's own objective text is present, which is what
+      keeps "each lane asked its own question" testable under fusion.
+    """
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
 
+    @staticmethod
+    def _names(prompt: str) -> list[str]:
+        """Entity names in input order, parsed from the numbered list."""
+        found = []
+        for line in prompt.splitlines():
+            line = line.strip()
+            if not line or not line[0].isdigit() or "name: " not in line:
+                continue
+            after = line.split("name: ", 1)[1]
+            found.append(after.split(";")[0].strip())
+        return found
+
     def __call__(self, prompt: str, **_: Any) -> str:
         self.prompts.append(prompt)
-        if "timing events" in prompt:
-            return json.dumps([
-                {"signal_type": "Benefits Renewal", "signal_date": "2025-08-04",
-                 "source": "https://example.gov/board"},
-                {"signal_type": "RFP/RFQ", "signal_date": "2024-05-07", "source": ""},
-            ])
-        if "current supplier" in prompt:
-            return json.dumps([{"incumbent_type": "standalone", "provider_name": "Acme"}])
-        return "[]"
+        out = []
+        for i, name in enumerate(self._names(prompt), 1):
+            obj: dict[str, Any] = {"n": i, "company_name": name}
+            if "timing events" in prompt:
+                obj["in_market_signals"] = [
+                    {"signal_type": "Benefits Renewal", "signal_date": "2025-08-04",
+                     "source": "https://example.gov/board"},
+                    {"signal_type": "RFP/RFQ", "signal_date": "2024-05-07", "source": ""},
+                ]
+            if "current supplier" in prompt:
+                obj["incumbent"] = [
+                    {"incumbent_type": "standalone", "provider_name": "Acme"}
+                ]
+            out.append(obj)
+        return json.dumps(out)
+
+
+def fused(prompt: str, **lane_rows: Any) -> str:
+    """Build a correctly-shaped fused response for every entity in `prompt`.
+
+    🔑 The doubles below used to return a FLAT array of rows, which was right for the
+    old one-call-per-lane phase. Under fusion that array never reaches `_coerce_rows`
+    at all — `obj.get("<lane>")` is None — so those tests passed while testing nothing.
+    Anything asserting on coercion must go through this.
+    """
+    names = FakeProvider._names(prompt)
+    return json.dumps(
+        [
+            {"n": i, "company_name": name, **lane_rows}
+            for i, name in enumerate(names, 1)
+        ]
+    )
 
 
 def _run(prospects, lanes, provider=None, log=None):
@@ -108,16 +155,27 @@ class TestManyLanes:
         joined = "\n".join(provider.prompts)
         assert "timing events" in joined and "current supplier" in joined
         assert '"signal_date"' in joined and '"incumbent_type"' in joined
-        # Each lane's field list appears only in its own prompt.
-        signals_prompt = next(p for p in provider.prompts if "timing events" in p)
-        assert '"incumbent_type"' not in signals_prompt
+        # 🔑 Under fusion both lanes share ONE prompt, so "its own prompt" is no longer
+        # the isolation boundary — the GROUP section is. A lane's fields must appear
+        # under its own group and nowhere else, which is a stricter check than before:
+        # the old test would have passed on a prompt that listed every field twice.
+        prompt = provider.prompts[0]
+        sections = prompt.split('GROUP "')
+        signals_section = next(x for x in sections if x.startswith("in_market_signals"))
+        incumbent_section = next(x for x in sections if x.startswith("incumbent"))
+        assert '"signal_date"' in signals_section
+        assert '"incumbent_type"' not in signals_section
+        assert '"incumbent_type"' in incumbent_section
+        assert '"signal_date"' not in incumbent_section
 
     def test_declared_fields_are_the_vocabulary_and_extras_are_dropped(self):
         class Chatty(FakeProvider):
             def __call__(self, prompt, **kw):
                 super().__call__(prompt, **kw)
-                return json.dumps([{"incumbent_type": "bundled", "provider_name": "X",
-                                    "confidence": "high", "notes": "chatty"}])
+                return fused(prompt, incumbent=[
+                    {"incumbent_type": "bundled", "provider_name": "X",
+                     "confidence": "high", "notes": "chatty"}
+                ])
 
         out = _run([PROSPECTS[0]], [INCUMBENT_LANE], provider=Chatty())
         assert out[0]["lanes"]["incumbent"] == [
@@ -128,7 +186,7 @@ class TestManyLanes:
         class Partial(FakeProvider):
             def __call__(self, prompt, **kw):
                 super().__call__(prompt, **kw)
-                return json.dumps([{"incumbent_type": "none"}])
+                return fused(prompt, incumbent=[{"incumbent_type": "none"}])
 
         out = _run([PROSPECTS[0]], [INCUMBENT_LANE], provider=Partial())
         assert out[0]["lanes"]["incumbent"] == [
@@ -152,10 +210,13 @@ class TestManyLanes:
     def test_declared_data_sources_reach_the_prompt_and_are_omitted_when_absent(self):
         provider = FakeProvider()
         _run([PROSPECTS[0]], [SIGNALS_LANE, INCUMBENT_LANE], provider=provider)
-        signals = next(p for p in provider.prompts if "timing events" in p)
-        incumbent = next(p for p in provider.prompts if "current supplier" in p)
+        sections = provider.prompts[0].split('GROUP "')
+        signals = next(x for x in sections if x.startswith("in_market_signals"))
+        incumbent = next(x for x in sections if x.startswith("incumbent"))
         assert "state procurement portals" in signals
         assert "WHERE TO LOOK" in signals
+        # The lane that declared no sources must not inherit the other lane's block —
+        # the failure fusion makes possible, and the reason this is asserted per section.
         assert "WHERE TO LOOK" not in incumbent
 
 
@@ -183,7 +244,9 @@ class TestFailureIsRecordedAsAbsence:
         class Empty(FakeProvider):
             def __call__(self, prompt, **kw):
                 super().__call__(prompt, **kw)
-                return json.dumps([{"incumbent_type": "", "provider_name": "  "}])
+                return fused(prompt, incumbent=[
+                    {"incumbent_type": "", "provider_name": "  "}
+                ])
 
         out = _run([PROSPECTS[0]], [INCUMBENT_LANE], provider=Empty())
         assert out[0]["lanes"]["incumbent"] == []
@@ -236,3 +299,126 @@ class TestLaneValidation:
         lane = {"key": "k", "objective": "o",
                 "fields": [{"key": "a"}, {"key": "a"}, {"key": "b"}]}
         assert enrichment.lane_fields(lane) == ["a", "b"]
+
+
+class TestFusionActuallyReducesCalls:
+    """🔴 The point of the change. Without this the fusion could regress silently.
+
+    Measured motivation, run `711b6652`: `enrichment` spent **171 grounded calls** on
+    57 prospects × 3 lanes — the Cartesian product the bundling ruling §3 exists to
+    remove. Cost is call COUNT, so a test that checks output shape and not call count
+    would pass on the version that costs 14x more.
+    """
+
+    THIRD_LANE = {
+        "key": "hiring",
+        "objective": "Find open roles that imply growth.",
+        "fields": [{"key": "role"}],
+    }
+
+    def _many(self, n: int) -> list[dict[str, Any]]:
+        return [
+            {"id": f"p{i}", "company_name": f"Co {i}", "city": "Atlanta", "state": "GA"}
+            for i in range(n)
+        ]
+
+    def test_one_call_per_BATCH_not_per_prospect_times_lane(self):
+        provider = FakeProvider()
+        lanes = [SIGNALS_LANE, INCUMBENT_LANE, self.THIRD_LANE]
+        _run(self._many(12), lanes, provider=provider)
+
+        # 3 groups -> batch 5 -> ceil(12/5) = 3 calls. The old shape was 12 x 3 = 36.
+        assert len(provider.prompts) == 3, (
+            f"expected 3 fused calls, got {len(provider.prompts)} "
+            "— the Cartesian product is back"
+        )
+
+    def test_every_prospect_still_gets_every_lane(self):
+        # Fewer calls must not mean fewer answers: the saving is worthless if it drops
+        # entities, which is exactly how an oversized batch fails (ruling §4).
+        lanes = [SIGNALS_LANE, INCUMBENT_LANE]
+        out = _run(self._many(7), lanes)
+        assert len(out) == 7
+        for entry in out:
+            assert set(entry["lanes"]) == {"in_market_signals", "incumbent"}
+            assert entry["lanes"]["in_market_signals"], "a prospect lost its rows"
+
+    def test_batch_size_follows_the_group_count(self):
+        # §4's table. 3+ groups is the only measured size and must not drift upward.
+        assert enrichment.batch_size_for(3) == 5
+        assert enrichment.batch_size_for(9) == 5
+        assert enrichment.batch_size_for(2) == 6
+        assert enrichment.batch_size_for(1) == 8
+
+    def test_the_five_guardrails_reach_the_prompt(self):
+        provider = FakeProvider()
+        _run(self._many(3), [SIGNALS_LANE, INCUMBENT_LANE], provider=provider)
+        prompt = provider.prompts[0]
+        # §5.1 numbered input list
+        assert "1. name: Co 0" in prompt and "2. name: Co 1" in prompt
+        # §5.2 exact official name, nothing else
+        assert "exact official name and NOTHING else" in prompt
+        # §5.3 one object per entity, in input order
+        assert "IN THE SAME ORDER" in prompt
+        assert "including ones you found nothing for" in prompt
+        # §5.4 empty array, never omission
+        assert "EMPTY ARRAY, never a missing key" in prompt
+
+    def test_a_short_response_is_REPORTED_not_silently_empty(self):
+        """§5.5 — 'do not let a batch of 8 silently return 5'."""
+
+        class Short(FakeProvider):
+            def __call__(self, prompt, **kw):
+                super().__call__(prompt, **kw)
+                names = self._names(prompt)
+                # Answer for the first entity only, and drop the rest.
+                return json.dumps(
+                    [{"n": 1, "company_name": names[0], "incumbent": []}]
+                )
+
+        events: list[dict[str, Any]] = []
+        logs: list[str] = []
+        enrichment.enrich_prospects(
+            self._many(4),
+            lanes=[INCUMBENT_LANE],
+            provider=Short(),
+            provider_config={"model": "m"},
+            parse_json_array=lambda raw: json.loads(raw),
+            scan_date="2026-07-20",
+            emit=events.append,
+            log=logs.append,
+        )
+        miss = next(e for e in events if e["type"] == "enrichment_unmatched")
+        assert miss["prospects"] == 3 and miss["of"] == 4
+        assert any("no object in the fused response" in m for m in logs)
+
+    def test_name_matching_recovers_a_response_returned_out_of_order(self):
+        """Position is the contract; a wrong-length response falls back to names."""
+
+        class Shuffled(FakeProvider):
+            def __call__(self, prompt, **kw):
+                super().__call__(prompt, **kw)
+                names = self._names(prompt)
+                objs = [
+                    {"n": i, "company_name": n, "incumbent": [{"incumbent_type": n}]}
+                    for i, n in enumerate(names, 1)
+                ]
+                # Reversed AND one extra, so the length check cannot save it.
+                return json.dumps(list(reversed(objs)) + [{"company_name": "Ghost Inc"}])
+
+        out = enrichment.enrich_prospects(
+            self._many(3),
+            lanes=[INCUMBENT_LANE],
+            provider=Shuffled(),
+            provider_config={"model": "m"},
+            parse_json_array=lambda raw: json.loads(raw),
+            scan_date="2026-07-20",
+        )
+        by_id = {e["prospect_id"]: e["lanes"]["incumbent"] for e in out}
+        # Each prospect got ITS OWN row back, not its neighbour's. `provider_name` is
+        # the declared field the model omitted, filled empty by `_coerce_rows` — so this
+        # also shows coercion still runs through the fused path.
+        for i in range(3):
+            assert by_id[f"p{i}"] == [
+                {"incumbent_type": f"Co {i}", "provider_name": ""}
+            ]
