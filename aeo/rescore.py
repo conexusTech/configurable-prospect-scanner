@@ -1,10 +1,31 @@
-"""Phase 2b — re-score prospects already in the database, from data already held.
+"""Phase 2b — PLANNING ONLY. Nothing here re-scores anything, and nothing calls it.
 
-**Ruled 2026-08-31.** Forward-only was the rule until the mixed-scale consequence was
-weighed: with nothing re-scored, one org's list holds a good lead at 52 beside an equally
-good lead at 93 **permanently**, because a later run SKIPS a company it has already seen
-(`runtime-scan-events.service.ts` — "SKIP, not update") rather than refreshing it. So the
-old scores never age out on their own.
+🔴 **NOT APPROVED, AND NOT A RULING. Forward-only is the standing decision.**
+
+The PO ruled on 2026-08-31: *"we do not need to rescore anything — what we need to fix is
+the future prospects' scoring."* Later, asked about the mixed-scale consequence, they said
+a re-scoring phase could come *after* the development. That is permission to think about
+it later, **not** permission to build or run it, and this module must not be read as the
+second thing.
+
+⚠️ An earlier version of this docblock said "Ruled 2026-08-31 … forward-only was the rule
+UNTIL the mixed-scale consequence was weighed", which asserted a reversal the PO never
+made. It is corrected here rather than quietly deleted, because a file claiming its own
+authorisation is exactly the kind of drift nobody re-reads for.
+
+**What this module is:** the pure, side-effect-free half — given rows and a config it
+returns what WOULD change, and refuses outright when the vertical cannot support the gate.
+It exists so that if the PO does ask for a re-score, the cost of answering "what would it
+do?" is a function call rather than a project. `aeo/rescore.py` is imported by its tests
+and by nothing else; there is no database layer and no CLI, so it cannot be executed
+against real data even by accident.
+
+**The argument it would have to answer, recorded so the decision is informed:** with
+nothing re-scored, one org's list holds a good lead at 52 beside an equally good lead at
+93 **permanently**, because a later run SKIPS a company it has already seen
+(`runtime-scan-events.service.ts` — "SKIP, not update") rather than refreshing it. Old
+scores never age out on their own. That is a real cost of forward-only, and it is the
+PO's to weigh — not this module's to pre-empt.
 
 🔴 **This reads stored rows and performs NO discovery.** No search, no browser, no
 grounded request — the inputs are the `validation_data` and `discovery_data` the original
