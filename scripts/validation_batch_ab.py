@@ -68,6 +68,7 @@ def _verdicts(
     provider: Any,
     provider_config: dict[str, Any],
     batch: int,
+    label: str = "arm",
 ) -> dict[str, dict[str, Any]]:
     out = validate_prospects(
         rows,
@@ -76,6 +77,12 @@ def _verdicts(
         provider_config=provider_config,
         parse_json_array=als.parse_json_array,
         batch_size=batch,
+        # 🔑 A heartbeat, because without one a slow arm and a wedged one are the same
+        # observation. `map_bounded`'s own docblock says so and this harness shipped
+        # without it, then spent ten minutes indistinguishable from hung. NOTE the
+        # deltas are NOT per-call latency — the walk is in submission order, so a slow
+        # call blocks counting every finished future behind it. Use total wall clock.
+        log=lambda m: print(f"    [{label}] {m}", flush=True),
     )
     return {r["prospect_id"]: r["validation_data"] for r in out}
 
@@ -170,8 +177,10 @@ def main() -> int:
     totals = Counter()
     all_notes: list[str] = []
     for run in range(1, args.repeat + 1):
-        control = _verdicts(rows, config, provider, pconf, 1)
-        variant = _verdicts(rows, config, provider, pconf, args.batch)
+        print(f"run {run}: control arm (batch 1)...", flush=True)
+        control = _verdicts(rows, config, provider, pconf, 1, "batch1")
+        print(f"run {run}: variant arm (batch {args.batch})...", flush=True)
+        variant = _verdicts(rows, config, provider, pconf, args.batch, "batchN")
         agree, notes = _compare(control, variant, rows)
         totals["agree"] += agree
         totals["total"] += len(control)

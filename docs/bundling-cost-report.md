@@ -154,9 +154,35 @@ calls without that measurement is trading a known saving against an unmeasured r
 quietly deleting qualified prospects — and the phase is specifically built so that failure
 looks like a thin market rather than a bug.
 
-**The A/B is the unlock**, and it is cheap: ~20 prospects with known verdicts, run at batch
-1 and batch 8, compared on `validated` / `disqualifiers_hit` agreement. If accuracy holds,
-111 calls follow.
+### 🔴 THE A/B WAS RUN 2026-08-31. IT FAILED.
+
+20 real consulting prospects, balanced 10 previously-validated / 10 previously-rejected,
+control arm complete (judged all 20, zero `None`):
+
+| | |
+|---|---:|
+| agreed | **6 / 20** |
+| `True → None` — batch **dropped** the prospect | **11** |
+| `True → False` — batch wrongly **rejected** a qualified lead | **3** |
+
+**14 of 20 qualified leads lost.** 11 is not a multiple of the batch size, so these are
+partial drops from *within* batches — the genuine dilution signal, not a timed-out call.
+
+Shipping this for its 111 calls would have returned a customer roughly a third of their
+real qualified leads with no error anywhere: §4's *"degrades silently by thinning results
+per entity and dropping entities from the response, both of which look like 'the data
+wasn't out there'."*
+
+**`DEFAULT_VALIDATION_BATCH` stays at 1.** The 55% total saving is not available. 35% is
+what this vertical can have without losing leads.
+
+⚠️ **An earlier run at concurrency 2 is INVALID and must not be cited**: its CONTROL arm
+failed 9 of 20 calls on timeouts, so it measured infrastructure rather than batching. The
+tell was that a non-batched arm cannot have a batching defect. Kept at
+`<scratchpad>/ab-run-INVALID-conc2.log` as evidence of the timeout mode.
+
+§10's smaller sizes (5, 3) are untested and the saving falls with them — 127 → 26 at 5,
+127 → 43 at 3. Measure before assuming smaller is safe: the failure at 8 was not marginal.
 
 ---
 

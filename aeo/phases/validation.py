@@ -87,8 +87,27 @@ present. Return only the JSON array."""
 #: for a signal whose wrong answer zeroes a lead is an accuracy A/B against a known
 #: sample, judged on correctness and never on row count.
 #:
-#: `scripts/validation_batch_ab.py` is that A/B. Raise this constant when it passes, not
-#: before — the batching below is written and tested, and waiting on evidence.
+#: `scripts/validation_batch_ab.py` is that A/B. **IT WAS RUN 2026-08-31 AT BATCH 8 AND
+#: IT FAILED — decisively.** 20 real consulting prospects, balanced 10 previously-validated
+#: / 10 previously-rejected, control arm complete (judged all 20):
+#:
+#:     agreed            6 / 20
+#:     True -> None     11   the batch DROPPED the prospect
+#:     True -> False     3   the batch wrongly REJECTED a qualified lead
+#:
+#: 🔴 **14 of 20 qualified leads lost.** The 11 is not a multiple of the batch size, so
+#: these are partial drops from WITHIN batches — the genuine dilution signal, not a
+#: timed-out call. Exactly §4's *"an oversized batch degrades silently by thinning results
+#: per entity and dropping entities from the response, both of which look like 'the data
+#: wasn't out there'."*
+#:
+#: Shipping this for its 111-call saving would have returned a customer roughly a third of
+#: their real qualified leads, with no error anywhere. **Do not raise this constant to 8.**
+#: §10's smaller sizes (5, 3) are untested here and the value falls with them; measure
+#: before assuming a smaller batch is safe, because the failure at 8 was not marginal.
+#:
+#: Evidence: `<scratchpad>/ab-run2.log`. An earlier run at concurrency 2 is INVALID —
+#: its control arm failed 9 of 20 calls on timeouts, so it measured infrastructure.
 DEFAULT_VALIDATION_BATCH = 1
 
 _BATCHED_PROMPT = """Judge each organization below against the seller's criteria.
@@ -173,6 +192,7 @@ def validate_prospects(
     parse_json_array: Callable[[str], list[dict[str, Any]]],
     emit: Callable[[dict[str, Any]], None] | None = None,
     batch_size: int = DEFAULT_VALIDATION_BATCH,
+    log: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Judge each prospect. Returns `[{prospect_id, validation_data}]`.
 
@@ -245,6 +265,8 @@ def validate_prospects(
             _judge_one,
             max_concurrency=concurrency_from(provider_config),
             timeout_s=DEFAULT_CALL_TIMEOUT_S,
+            log=log,
+            label="prospects",
         )
     else:
         batches = chunk(targets, size)
@@ -253,6 +275,8 @@ def validate_prospects(
             _judge_batch,
             max_concurrency=concurrency_from(provider_config),
             timeout_s=DEFAULT_CALL_TIMEOUT_S,
+            log=log,
+            label="batches",
         )
         verdicts = []
         for batch, matched in zip(batches, answered):
