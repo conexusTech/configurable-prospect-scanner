@@ -27,6 +27,10 @@ from typing import Any, Callable, Optional, Sequence
 
 #: Kept deliberately tight. "Do not over explain" is a ruling, not a preference, and a
 #: model given room will fill it.
+#: Matches `ai_judgment`'s ceiling — a non-grounded paragraph is a fast call, and a
+#: hung one must not hold the phase open.
+DEFAULT_CALL_TIMEOUT_S = 120.0
+
 MAX_CHARS = 420
 
 _PROMPT = """\
@@ -181,7 +185,32 @@ def explain_scores(
         facts = build_facts(breakdown, p)
         prompt = _PROMPT.format(facts="\n".join(facts), max_chars=MAX_CHARS)
         try:
-            text = str(provider(prompt, **provider_config) or "").strip()
+            # 🔴 **`grounded=False` EXPLICITLY, and every kwarg named rather than
+            # splatted.** `gemini_provider` defaults `grounded=True`, so
+            # `provider(prompt, **provider_config)` silently bought a Google Search on
+            # every prospect — against the docblock above this module, which promises
+            # zero grounded requests and says this phase does not touch the shared
+            # quota. That quota is shared with production and its exhaustion has already
+            # produced a run that completed with 0 prospects and no error.
+            #
+            # Splatting also made the call depend on the caller assembling the exact
+            # kwarg set: `_provider_config()` does not return `timeout_s`, so a caller
+            # using the standard config raised TypeError per prospect and the phase
+            # reported 24 individual failures — a config error wearing the costume of a
+            # data problem. `ai_judgment` names its kwargs for the same reasons.
+            text = str(
+                provider(
+                    prompt,
+                    model=provider_config.get("judgment_model")
+                    or provider_config.get("model"),
+                    temperature=provider_config.get("temperature", 0.1),
+                    retry_attempts=provider_config.get("retry_attempts", 3),
+                    timeout_s=provider_config.get("timeout_s", DEFAULT_CALL_TIMEOUT_S),
+                    grounded=False,
+                    phase="score_explanation",
+                )
+                or ""
+            ).strip()
         except Exception as exc:  # one prospect must not fail the phase
             if emit:
                 emit({"type": "score_explanation_failed",

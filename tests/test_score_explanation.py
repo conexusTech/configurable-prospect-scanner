@@ -161,3 +161,76 @@ class TestTheJudgmentPromptStaysLegacySafe:
 
     def test_both_blocks_are_separable_so_the_gated_path_can_drop_them(self):
         assert _FIT_SECTION and _ADJUSTMENT_FIELD
+
+
+class TestItNeverBuysAGroundedSearch:
+    """🔴 The phase promises zero grounded requests. Nothing asserted it until 2026-08-31.
+
+    `gemini_provider` defaults `grounded=True`, and this phase used to call
+    `provider(prompt, **provider_config)` — so every prospect silently bought a Google
+    Search against a quota shared with production, whose exhaustion has already produced
+    a run that completed with 0 prospects and no error. The docblock said otherwise, the
+    tests were green, and the only reason it was caught is that the splat ALSO broke on a
+    missing kwarg before any call went out.
+    """
+
+    def _capture(self):
+        seen: list[dict] = []
+
+        def provider(prompt, **kwargs):
+            seen.append(kwargs)
+            return "Scores 92 because the signal is fresh and the contact is confirmed."
+
+        return provider, seen
+
+    def _row(self):
+        return {
+            "id": "p1",
+            "company_name": "Acme",
+            "score_factors": {
+                "gated": {
+                    "total": 92,
+                    "lane": "qualified",
+                    "gates": {"target_market": True, "buying_window": True},
+                    "bonus": 12,
+                    "bands": {
+                        "signal_strength": 5,
+                        "company_size": 2,
+                        "confirmed_contact": 4,
+                        "signal_recency": 1,
+                    },
+                    "selected_signal": {
+                        "signal_type": "benefits change",
+                        "signal_date": "2026-08-01",
+                    },
+                    "selected_from_fresh": True,
+                }
+            },
+        }
+
+    def test_the_provider_is_called_with_grounded_False(self):
+        provider, seen = self._capture()
+        explain_scores([self._row()], provider=provider, provider_config={"model": "m"})
+        assert seen, "the provider was never called — the test proves nothing"
+        assert seen[0]["grounded"] is False
+
+    def test_it_works_from_the_STANDARD_provider_config(self):
+        # `_provider_config()` returns no `timeout_s`. Splatting it raised TypeError per
+        # prospect, so a config error surfaced as N individual data failures.
+        provider, seen = self._capture()
+        standard = {
+            "model": "gemini-2.5-flash",
+            "temperature": 0.1,
+            "entries_per_query": 3,
+            "retry_attempts": 3,
+            "max_concurrency": 6,
+        }
+        out = explain_scores([self._row()], provider=provider, provider_config=standard)
+        assert out, "a standard provider_config must not fail the phase"
+        assert seen[0]["grounded"] is False
+        assert seen[0]["timeout_s"] > 0
+
+    def test_it_names_the_phase_so_the_invoice_can_be_attributed(self):
+        provider, seen = self._capture()
+        explain_scores([self._row()], provider=provider, provider_config={"model": "m"})
+        assert seen[0]["phase"] == "score_explanation"
