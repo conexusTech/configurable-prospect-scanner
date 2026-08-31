@@ -24,6 +24,12 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from aeo.phases._batching import (
+    BATCH_OUTPUT_RULES,
+    chunk,
+    numbered_input,
+    reconcile,
+)
 from aeo.phases._concurrent import (
     DEFAULT_CALL_TIMEOUT_S,
     PHASE_RETRY_ATTEMPTS,
@@ -67,6 +73,67 @@ Return a JSON array with exactly one object:
 present. Return only the JSON array."""
 
 
+#: Prospects per validation call.
+#:
+#: 🔴 **1 — deliberately, and NOT because §4 forbids more.** §4's table permits 8 for a
+#: single-signal phase, worth 111 grounded calls on the reference run (20% of it). It is
+#: not taken because this phase decides `validated`, and a false verdict REMOVES the lead:
+#:
+#:   *"Recording an unjudged prospect as invalid would silently shrink every result set,
+#:   and nothing would look wrong — the failure mode this whole feature keeps producing."*
+#:
+#: A degraded enrichment call returns fewer rows, which is visible. A degraded validation
+#: call returns fewer PROSPECTS, which is indistinguishable from a thin market. §6's bar
+#: for a signal whose wrong answer zeroes a lead is an accuracy A/B against a known
+#: sample, judged on correctness and never on row count.
+#:
+#: `scripts/validation_batch_ab.py` is that A/B. Raise this constant when it passes, not
+#: before — the batching below is written and tested, and waiting on evidence.
+DEFAULT_VALIDATION_BATCH = 1
+
+_BATCHED_PROMPT = """Judge each organization below against the seller's criteria.
+
+ORGANIZATIONS — {count} of them, numbered. Judge every one INDEPENDENTLY.
+{prospects}
+
+THE SELLER IS LOOKING FOR THESE IN-MARKET SIGNALS
+{signals}
+
+ANY OF THESE DISQUALIFIES A PROSPECT OUTRIGHT
+{disqualifiers}
+
+THE SELLER'S EXPLICIT REQUIREMENTS (thresholds and constraints they stated)
+{rules}
+
+A requirement you CAN evaluate and a prospect FAILS is a disqualifier: say so in that
+prospect's `disqualifiers_hit` using the requirement's own wording. A requirement you
+cannot evaluate from the evidence available is NOT a failure — leave it out and do not
+guess a value in order to judge it.
+
+Decide using only the information above plus what you can ground from public sources.
+Do not invent facts about any prospect.
+
+⚠️ Judge each organization on ITS OWN evidence. Evidence about one organization says
+nothing about another, and a disqualifier that applies to one does not carry to the rest.
+
+OUTPUT
+Return a JSON array of exactly {count} objects, one per organization:
+
+{{
+  "n": <the organization's number from the list above>,
+  "company_name": "<its exact official name, copied from the list>",
+  "validated": true|false,
+  "signals_found": ["<signal text you judged present>"],
+  "disqualifiers_hit": ["<disqualifier text that applies>"],
+  "reasoning": "<one or two sentences>"
+}}
+
+{batch_rules}
+
+`validated` is false for a prospect if any disqualifier applies to IT, or if no in-market
+signal is present for IT. Return only the JSON array."""
+
+
 def _as_lines(value: Any) -> str:
     """Render a resolved context value as prompt lines. Never returns empty."""
     if isinstance(value, list):
@@ -105,8 +172,13 @@ def validate_prospects(
     provider_config: dict[str, Any],
     parse_json_array: Callable[[str], list[dict[str, Any]]],
     emit: Callable[[dict[str, Any]], None] | None = None,
+    batch_size: int = DEFAULT_VALIDATION_BATCH,
 ) -> list[dict[str, Any]]:
     """Judge each prospect. Returns `[{prospect_id, validation_data}]`.
+
+    `batch_size` is 1 by default and the single-prospect prompt is used unchanged at
+    that size — so this phase's behaviour is byte-identical until someone raises it.
+    See `DEFAULT_VALIDATION_BATCH` for why it is not already higher.
 
     `validation_config` is the config's `validation` section **already resolved** —
     its `in_market_signals` and `disqualifiers` are two of the nine R12-bound
@@ -124,14 +196,10 @@ def validate_prospects(
 
     targets = [p for p in prospects if p.get("id")]
 
-    def _judge(prospect: dict[str, Any]) -> dict[str, Any]:
-        prompt = _PROMPT.format(
-            prospect=_prospect_summary(prospect),
-            signals=signals,
-            disqualifiers=disqualifiers,
-            rules=rules,
-        )
-        raw = provider(
+    size = max(1, int(batch_size or 1))
+
+    def _ask(prompt: str) -> str:
+        return provider(
             prompt,
             model=provider_config.get("model"),
             temperature=provider_config.get("temperature", 0.1),
@@ -140,17 +208,56 @@ def validate_prospects(
             timeout_s=DEFAULT_CALL_TIMEOUT_S,
             phase="validation",
         )
+
+    def _judge_one(prospect: dict[str, Any]) -> dict[str, Any]:
+        raw = _ask(
+            _PROMPT.format(
+                prospect=_prospect_summary(prospect),
+                signals=signals,
+                disqualifiers=disqualifiers,
+                rules=rules,
+            )
+        )
         parsed = parse_json_array(raw)
         return parsed[0] if parsed else {}
 
+    def _judge_batch(batch: list[dict[str, Any]]) -> list[dict[str, Any] | None]:
+        raw = _ask(
+            _BATCHED_PROMPT.format(
+                count=len(batch),
+                prospects=numbered_input(batch, _prospect_summary),
+                signals=signals,
+                disqualifiers=disqualifiers,
+                rules=rules,
+                batch_rules=BATCH_OUTPUT_RULES.format(name_key="company_name"),
+            )
+        )
+        return reconcile(batch, parse_json_array(raw) or [])
+
     # Bounded + timeout-enforced: the provider ignores `timeout_s`, so a sequential
     # loop here has no upper bound at all. See aeo/phases/_concurrent.py.
-    verdicts = map_bounded(
-        targets,
-        _judge,
-        max_concurrency=concurrency_from(provider_config),
-        timeout_s=DEFAULT_CALL_TIMEOUT_S,
-    )
+    if size == 1:
+        # The unchanged path. Kept verbatim rather than routed through the batched one
+        # at size 1, so "we did not change the default" is true of the PROMPT too — an
+        # A/B whose control arm was silently rewritten measures nothing.
+        verdicts = map_bounded(
+            targets,
+            _judge_one,
+            max_concurrency=concurrency_from(provider_config),
+            timeout_s=DEFAULT_CALL_TIMEOUT_S,
+        )
+    else:
+        batches = chunk(targets, size)
+        answered = map_bounded(
+            batches,
+            _judge_batch,
+            max_concurrency=concurrency_from(provider_config),
+            timeout_s=DEFAULT_CALL_TIMEOUT_S,
+        )
+        verdicts = []
+        for batch, matched in zip(batches, answered):
+            rows = matched or [None] * len(batch)
+            verdicts.extend(rows)
 
     results: list[dict[str, Any]] = []
     for prospect, verdict in zip(targets, verdicts):

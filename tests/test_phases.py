@@ -289,3 +289,113 @@ class TestContactsAreBatched:
         assert "IN THE SAME ORDER" in prompt
         # The phase's own non-negotiable survives batching.
         assert "Do not guess or construct an email address" in prompt
+
+
+class TestValidationBatchingIsDormant:
+    """Batching exists here, defaults OFF, and waits on an accuracy A/B.
+
+    🔴 §4 would permit batch 8 for this single-signal phase — 111 grounded calls on the
+    reference run, 20% of it. Not taken, because a false verdict here REMOVES the lead:
+    a degraded batch returns fewer PROSPECTS, which is indistinguishable from a thin
+    market. §6's bar for a signal whose wrong answer zeroes a lead is an accuracy A/B
+    against a known sample, judged on correctness never row count.
+    """
+
+    @staticmethod
+    def _many(n: int) -> list[dict]:
+        return [
+            {"id": f"p{i}", "company_name": f"Co {i}", "city": "Austin", "state": "TX"}
+            for i in range(n)
+        ]
+
+    def test_the_default_is_ONE_and_the_control_prompt_is_untouched(self):
+        # An A/B whose control arm was silently rewritten measures nothing. At the
+        # default the phase must send the ORIGINAL single-prospect prompt, not the
+        # batched one with a count of 1.
+        from aeo.phases.validation import DEFAULT_VALIDATION_BATCH
+
+        assert DEFAULT_VALIDATION_BATCH == 1
+        provider = _provider(json.dumps([{"validated": True}]))
+        validate_prospects(
+            self._many(3), validation_config=VALIDATION_CFG, provider=provider,
+            provider_config={}, parse_json_array=_parse,
+        )
+        assert len(provider.prompts) == 3, "default must stay one call per prospect"
+        assert "ORGANIZATIONS —" not in provider.prompts[0]
+        assert "PROSPECT" in provider.prompts[0]
+
+    def test_at_batch_eight_it_makes_one_call_per_batch(self):
+        provider = _provider(json.dumps([
+            {"n": i, "company_name": f"Co {i-1}", "validated": True} for i in range(1, 9)
+        ]))
+        validate_prospects(
+            self._many(8), validation_config=VALIDATION_CFG, provider=provider,
+            provider_config={}, parse_json_array=_parse, batch_size=8,
+        )
+        assert len(provider.prompts) == 1
+
+    def test_each_prospect_keeps_ITS_OWN_verdict(self):
+        # The failure batching makes possible, and the one that matters most here:
+        # a disqualifier belonging to one prospect carrying to its neighbours.
+        def call(prompt, **kw):
+            call.prompts.append(prompt)
+            return json.dumps([
+                {"n": 1, "company_name": "Co 0", "validated": True,
+                 "signals_found": ["expanding"]},
+                {"n": 2, "company_name": "Co 1", "validated": False,
+                 "disqualifiers_hit": ["too small"]},
+                {"n": 3, "company_name": "Co 2", "validated": True,
+                 "signals_found": ["hiring"]},
+            ])
+
+        call.prompts = []
+        out = validate_prospects(
+            self._many(3), validation_config=VALIDATION_CFG, provider=call,
+            provider_config={}, parse_json_array=_parse, batch_size=8,
+        )
+        by_id = {o["prospect_id"]: o["validation_data"] for o in out}
+        assert by_id["p0"]["validated"] is True
+        assert by_id["p1"]["validated"] is False
+        assert by_id["p1"]["disqualifiers_hit"] == ["too small"]
+        assert by_id["p2"]["validated"] is True
+        # The disqualifier did NOT leak to its neighbours.
+        assert by_id["p0"]["disqualifiers_hit"] == []
+        assert by_id["p2"]["disqualifiers_hit"] == []
+
+    def test_an_unmatched_prospect_is_NULL_not_FALSE(self):
+        """🔴 The safety property that makes batching this phase survivable at all.
+
+        A prospect the model omitted was NOT judged. Recording it as `False` would
+        remove a lead nobody assessed, and the run would look like a thin market.
+        """
+        def call(prompt, **kw):
+            call.prompts.append(prompt)
+            # Answers for the first only; the other three are dropped.
+            return json.dumps([{"n": 1, "company_name": "Co 0", "validated": True}])
+
+        call.prompts = []
+        out = validate_prospects(
+            self._many(4), validation_config=VALIDATION_CFG, provider=call,
+            provider_config={}, parse_json_array=_parse, batch_size=8,
+        )
+        by_id = {o["prospect_id"]: o["validation_data"] for o in out}
+        assert by_id["p0"]["validated"] is True
+        for missing in ("p1", "p2", "p3"):
+            assert by_id[missing]["validated"] is None, (
+                "an unjudged prospect must be null, never false — false would delete a "
+                "lead nobody assessed"
+            )
+
+    def test_the_independence_instruction_reaches_the_batched_prompt(self):
+        provider = _provider(json.dumps([
+            {"n": 1, "company_name": "Co 0", "validated": True}
+        ]))
+        validate_prospects(
+            self._many(1), validation_config=VALIDATION_CFG, provider=provider,
+            provider_config={}, parse_json_array=_parse, batch_size=8,
+        )
+        prompt = provider.prompts[0]
+        assert "Judge every one INDEPENDENTLY" in prompt
+        assert "a disqualifier that applies to one does not carry to the rest" in prompt
+        # The per-prospect evidence standard survives batching — the §6 concern.
+        assert "do not\nguess a value in order to judge it" in prompt
