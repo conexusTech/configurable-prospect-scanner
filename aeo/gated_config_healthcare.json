@@ -1,0 +1,132 @@
+{
+  "$comment": "Gated scoring config for healthcare-prospect-scanner (MYgroup). Authored by hand 2026-08-31 from the spec's §4 template; step 10 (CSB gate authoring) is what makes this an operator task rather than a hand-edit. PER-ORG values — home_markets, state_aliases — come from organizations.onboarding_data.geographic_strategy. window_stages are the shared TIMELINE ladder's in-market rungs; this skill declares no pipeline block of its own, so the gateway's 7-rung ladder is the vocabulary.",
+  "model": "gated",
+  "floor": 80,
+  "score_cap": 100,
+  "gate": {
+    "signal_freshness_months": 18,
+    "target_market": {
+      "state_field": "state",
+      "allowed_states": [
+        "NC"
+      ],
+      "allowed_states_from": "geographic_strategy.home_markets",
+      "$comment_aliases": "The org writes 'North Carolina'; every prospect carries 'NC'. Without this map the two never match, G1 closes on everyone, and every lead caps at the nurture ceiling with no error anywhere. This is the single commonest silent failure of this gate.",
+      "state_aliases": {
+        "north carolina": "NC",
+        "n.c.": "NC",
+        "nc": "NC"
+      }
+    },
+    "buying_window": {
+      "$comment": "In the market. The shared TIMELINE ladder's first five rungs. '6 - Likely Awarded' and '7 - Too Late' are excluded deliberately: both mean the decision has effectively been made, which is the opposite of an open window.",
+      "window_stages": [
+        "1 - Early Discovery",
+        "2 - Relationship Building",
+        "3 - Design Influence",
+        "4 - Active Pursuit",
+        "5 - Decision Imminent"
+      ],
+      "gate_on": "any_fresh",
+      "signal_freshness_months": 18
+    }
+  },
+  "bonus": {
+    "max": 20,
+    "signal_strength": {
+      "field": "signal_class",
+      "max": 8,
+      "unusable_class_points": 4,
+      "classes": {
+        "rfp_active": 8,
+        "broker_carrier_change": 6,
+        "benefits_change": 5,
+        "dissatisfaction": 4,
+        "corporate_event": 2,
+        "workforce_change": 2,
+        "leadership_change": 1
+      }
+    },
+    "company_size": {
+      "field": "employee_count",
+      "max": 4,
+      "tiers": [
+        [
+          400,
+          4
+        ],
+        [
+          200,
+          3
+        ],
+        [
+          100,
+          2
+        ],
+        [
+          50,
+          1
+        ]
+      ],
+      "below_lowest": 0,
+      "unknown": 2
+    },
+    "confirmed_contact": {
+      "max": 4,
+      "rules": [
+        [
+          "contact_name",
+          2
+        ],
+        [
+          "contact_email",
+          1
+        ],
+        [
+          "contact_phone",
+          1
+        ]
+      ]
+    },
+    "signal_recency": {
+      "field": "signal_date",
+      "max": 4,
+      "months": [
+        [
+          1,
+          4
+        ],
+        [
+          3,
+          3
+        ],
+        [
+          6,
+          2
+        ],
+        [
+          12,
+          1
+        ]
+      ],
+      "beyond_last": 0,
+      "partial_precision": "earliest",
+      "future": "clamp_to_zero"
+    }
+  },
+  "partial": {
+    "target_market_only": {
+      "base": 25,
+      "ceiling": 45
+    },
+    "signal_only": {
+      "base": 10,
+      "ceiling": 30
+    },
+    "neither": {
+      "base": 0,
+      "ceiling": 15
+    }
+  },
+  "$comment_bands": "priority_band_source is deliberately NOT set to 'lane'. The skill already declares priority_bands Hot 75-100 / Warm 50-74 / Cold 0-49, and the gated scores map onto them cleanly: qualified 88-98 -> Hot - Ready Now, gated-out 32-40 -> Cold - Monitor. Keeping range sourcing means no frontend change and no new vocabulary. Note 'Hot - Ready Now' had NEVER been awarded before this: the legacy model's highest score on this run was 73, two points under its own threshold. Warm 50-74 becomes empty by design - it sits inside the structurally-empty 46-79 band, which is the whole point of removing the ambiguous middle."
+}
