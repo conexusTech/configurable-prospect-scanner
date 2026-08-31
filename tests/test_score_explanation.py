@@ -234,3 +234,77 @@ class TestItNeverBuysAGroundedSearch:
         provider, seen = self._capture()
         explain_scores([self._row()], provider=provider, provider_config={"model": "m"})
         assert seen[0]["phase"] == "score_explanation"
+
+
+class TestItCannotHangThePhase:
+    """🔴 `timeout_s` is accepted by the provider and IGNORED — the caller must enforce it.
+
+    `gemini_provider` carries `timeout_s: float,  # noqa: ARG001 — enforced by the caller
+    via signal/thread`. A plain sequential loop therefore passes a timeout nothing honours,
+    and one hung call blocks the phase forever. Measured 2026-08-31: 20+ minutes of wall
+    clock for 0.8s of CPU, no output, indistinguishable from slow work.
+    """
+
+    def _row(self, pid):
+        return {
+            "id": pid,
+            "company_name": "Acme",
+            "score_factors": {
+                "gated": {
+                    "total": 92, "lane": "qualified",
+                    "gates": {"target_market": True, "buying_window": True},
+                    "bonus": 12,
+                    "bands": {"signal_strength": 5, "company_size": 2,
+                              "confirmed_contact": 4, "signal_recency": 1},
+                    "selected_signal": {"signal_type": "benefits change",
+                                        "signal_date": "2026-08-01"},
+                    "selected_from_fresh": True,
+                }
+            },
+        }
+
+    def test_a_hung_call_times_out_instead_of_blocking_forever(self):
+        import time
+
+        def hangs(prompt, **kwargs):
+            time.sleep(30)  # far past the timeout below
+            return "never returned"
+
+        events = []
+        started = time.monotonic()
+        out = explain_scores(
+            [self._row("p1")],
+            provider=hangs,
+            provider_config={"model": "m", "timeout_s": 0.5, "max_concurrency": 2},
+            emit=events.append,
+        )
+        elapsed = time.monotonic() - started
+
+        # The point: it RETURNS. Before the fix this test would sit for 30s and the
+        # real phase sat for 20+ minutes.
+        assert elapsed < 10, f"phase did not honour timeout_s (took {elapsed:.1f}s)"
+        assert out == {}, "a timed-out call must not produce an explanation"
+
+    def test_one_hung_prospect_does_not_lose_the_others(self):
+        import time
+
+        # ⚠️ Keyed on `state`, not on company_name: `build_facts` does NOT put the
+        # company name in the prompt, so a name-based discriminator silently matches
+        # nothing and both calls return fast — which is how the first version of this
+        # test passed while proving the opposite of what it claimed. `state` reaches the
+        # prompt and carries no digits, so it cannot disturb the number validation.
+        def slow_for_p1(prompt, **kwargs):
+            if "(ZZ)" in prompt:
+                time.sleep(30)
+            return "Scores 92 because the signal is fresh and the contact is confirmed."
+
+        rows = [self._row("p1"), self._row("p2")]
+        rows[0]["state"] = "ZZ"
+        out = explain_scores(
+            rows,
+            provider=slow_for_p1,
+            provider_config={"model": "m", "timeout_s": 0.5, "max_concurrency": 2},
+        )
+        # p2 survives. Order-preserving mapping is what makes this safe to assert.
+        assert "p2" in out
+        assert "p1" not in out

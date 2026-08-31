@@ -27,9 +27,9 @@ from typing import Any, Callable, Optional, Sequence
 
 #: Kept deliberately tight. "Do not over explain" is a ruling, not a preference, and a
 #: model given room will fill it.
-#: Matches `ai_judgment`'s ceiling — a non-grounded paragraph is a fast call, and a
-#: hung one must not hold the phase open.
-DEFAULT_CALL_TIMEOUT_S = 120.0
+from aeo.phases._concurrent import DEFAULT_CALL_TIMEOUT_S, map_bounded
+
+NEWLINE = chr(10)
 
 MAX_CHARS = 420
 
@@ -177,46 +177,71 @@ def explain_scores(
     is honest; a fabricated one is the defect this phase exists to prevent, and a silent
     fallback would make the two indistinguishable.
     """
-    out: dict[str, str] = {}
+    # 🔴 **Bounded, because `timeout_s` is NOT enforced by the provider.**
+    #
+    # `gemini_provider` carries `timeout_s: float,  # noqa: ARG001 — enforced by the
+    # caller via signal/thread`. It accepts the argument and ignores it. A plain
+    # sequential loop therefore passes a timeout nothing honours, and ONE hung call
+    # blocks the phase forever — measured 2026-08-31 re-scoring MYgroup: 20+ minutes
+    # of wall clock for 0.8s of CPU, no output, indistinguishable from slow work.
+    #
+    # `map_bounded` is what every other per-prospect phase uses and it enforces the
+    # timeout with a thread, caps concurrency, and emits a liveness heartbeat. Reusing
+    # it is also why this phase now behaves the same way under load as `ai_judgment`
+    # rather than having its own failure mode.
+    prepared: list[tuple[dict[str, Any], dict[str, Any], str]] = []
     for p in prospects:
         breakdown = ((p.get("score_factors") or {}).get("gated")) or {}
         if not breakdown:
             continue
         facts = build_facts(breakdown, p)
-        prompt = _PROMPT.format(facts="\n".join(facts), max_chars=MAX_CHARS)
-        try:
-            # 🔴 **`grounded=False` EXPLICITLY, and every kwarg named rather than
-            # splatted.** `gemini_provider` defaults `grounded=True`, so
-            # `provider(prompt, **provider_config)` silently bought a Google Search on
-            # every prospect — against the docblock above this module, which promises
-            # zero grounded requests and says this phase does not touch the shared
-            # quota. That quota is shared with production and its exhaustion has already
-            # produced a run that completed with 0 prospects and no error.
-            #
-            # Splatting also made the call depend on the caller assembling the exact
-            # kwarg set: `_provider_config()` does not return `timeout_s`, so a caller
-            # using the standard config raised TypeError per prospect and the phase
-            # reported 24 individual failures — a config error wearing the costume of a
-            # data problem. `ai_judgment` names its kwargs for the same reasons.
-            text = str(
-                provider(
-                    prompt,
-                    model=provider_config.get("judgment_model")
-                    or provider_config.get("model"),
-                    temperature=provider_config.get("temperature", 0.1),
-                    retry_attempts=provider_config.get("retry_attempts", 3),
-                    timeout_s=provider_config.get("timeout_s", DEFAULT_CALL_TIMEOUT_S),
-                    grounded=False,
-                    phase="score_explanation",
-                )
-                or ""
-            ).strip()
-        except Exception as exc:  # one prospect must not fail the phase
-            if emit:
-                emit({"type": "score_explanation_failed",
-                      "prospect_id": p.get("id"), "error": str(exc)})
-            continue
-        text = text.strip().strip('"')
+        prepared.append(
+            (
+                p,
+                breakdown,
+                _PROMPT.format(facts=NEWLINE.join(facts), max_chars=MAX_CHARS),
+            )
+        )
+
+    def _one(item: tuple[dict[str, Any], dict[str, Any], str]) -> Optional[str]:
+        _p, _breakdown, prompt = item
+        # 🔴 `grounded=False` EXPLICITLY, and every kwarg named rather than splatted.
+        # `gemini_provider` defaults `grounded=True`, so `provider(prompt,
+        # **provider_config)` silently bought a Google Search on every prospect —
+        # against this module's own docblock, which promises zero grounded requests.
+        # That quota is shared with production and its exhaustion has already produced
+        # a run that completed with 0 prospects and no error.
+        #
+        # Splatting also made the call depend on the caller assembling the exact kwarg
+        # set: `_provider_config()` returns no `timeout_s`, so a standard config raised
+        # TypeError per prospect — a config error wearing the costume of a data problem.
+        return provider(
+            prompt,
+            model=provider_config.get("judgment_model") or provider_config.get("model"),
+            temperature=provider_config.get("temperature", 0.1),
+            retry_attempts=provider_config.get("retry_attempts", 3),
+            timeout_s=provider_config.get("timeout_s", DEFAULT_CALL_TIMEOUT_S),
+            grounded=False,
+            phase="score_explanation",
+        )
+
+    raw_results = map_bounded(
+        prepared,
+        _one,
+        max_concurrency=int(provider_config.get("max_concurrency", 2)),
+        timeout_s=float(provider_config.get("timeout_s", DEFAULT_CALL_TIMEOUT_S)),
+        on_error=lambda item, exc: emit(
+            {"type": "score_explanation_failed",
+             "prospect_id": item[0].get("id"), "error": str(exc)}
+        ) if emit else None,
+        label="explanations",
+    )
+
+    out: dict[str, str] = {}
+    for (p, breakdown, _prompt), raw in zip(prepared, raw_results):
+        if raw is None:
+            continue  # failed or timed out; `on_error` already emitted
+        text = str(raw or "").strip().strip('"')
         reason = validate_explanation(text, breakdown, p)
         if reason:
             if emit:
