@@ -102,21 +102,65 @@ heaviest phase by thinking tokens, so the wall-clock gain should be the most vis
 
 ---
 
-## 5. What is NOT being fused, with §6 reasons
+## 5. SHIPPED — measured against the code, not projected
 
-| phase | why held back |
-|---|---|
-| `geography` | **Both §6 exceptions at once.** It is a search→verify→re-search *loop* whose verdict **rejects** a lead outright, under a strict evidence standard. §6: *"if a wrong answer zeroes the lead rather than scoring it lower, that signal earns its own call."* |
-| `validation` | **§6 candidate** — it produces `disqualifiers_hit`, a hard disqualifier. §6 requires an A/B on classification accuracy against a known sample **before** fusing, judged on correctness not row count. Not fused in phase 1. |
-| `zip_discovery`, `discovery` | §2 — generative. Bundling targets costs 2.7× recall, invisibly. Cost control here is target selection, never fusion. |
+| phase | before | after | mechanism |
+|---|---:|---:|---|
+| `enrichment` | 171 | **12** | §3 fuse 3 lanes + §4 batch 5 |
+| `contacts` | 50 | **9** | §4 batch 6 (no fusion — see below) |
+| **total** | **221** | **21** | **−200 grounded calls** |
 
-If `validation` later passes its A/B it does NOT fold into C1 either — it runs on set B (geo
-survivors, 127) before enrichment's set C1 exists. It would batch alone at 5:
-`127 → ceil(127/5) = 26`, a further **101 calls saved**.
+**568 → 368 grounded requests on the reference run, −35%.** At its own all-in rate
+($153.76 ÷ 568 = $0.271) that is **~$54**; at the ruling's $0.15 basis, $30.
+
+✅ **Verified across 15 shapes that the gateway estimator and the scanner agree** on call
+count for 1/2/3 lanes at 7/50/120/150 entities and contacts at 13/50/150. Pinned from both
+sides — `tests/test_batching_contract.py` here, `prospect-cost.constants.spec.ts` there.
 
 ---
 
-## 6. Batch size — measured, not assumed (§10)
+## 6. What is NOT batched or fused, with reasons
+
+| phase | held | reason |
+|---|---|---|
+| `zip_discovery`, `discovery` | §2 | **Generative.** Merging targets costs 2.7× recall, invisibly — the merged call returns a full-looking list. Cost control here is target selection, never bundling. |
+| `geography` | §6, both exceptions | A search→verify→re-search **loop** whose verdict **rejects** a lead outright. Batching a loop whose exit condition is "enough results are in area" changes the loop, not just its cost. |
+| `validation` | §6, deliberately | See below. |
+| `contacts` | §3 does not apply | It runs AFTER scoring on a top-N cut; `enrichment` runs BEFORE it on validation survivors. Different entity sets at different pipeline points — batched (§4), not fused (§3). |
+
+### 🔴 Why `validation` is NOT batched, though §4 would permit it
+
+It is a single-signal phase, so §4's table says batch 8 — `127 → 16` calls, **111 saved**,
+the largest remaining win. It is being left alone anyway.
+
+§6's exception is written about fusion, and validation has nothing to fuse with. But its
+**reasoning** is about instruction dilution, and that applies to batching entities just as
+it does to mixing signals. Its prompt is precisely the evidence-standard language §6 names:
+
+> *"A requirement you CAN evaluate and the prospect FAILS is a disqualifier … A requirement
+> you cannot evaluate from the evidence available is NOT a failure — leave it out and do
+> not guess a value in order to judge it."*
+
+And its own module docblock states the failure mode:
+
+> *"An unparseable model response is `validated: null`, never `False`. Absence of evidence
+> is not disqualification. Recording an unjudged prospect as invalid would **silently
+> shrink every result set, and nothing would look wrong** — the failure mode this whole
+> feature keeps producing."*
+
+**A wrong answer here zeroes a lead.** §6's instruction is to A/B classification accuracy
+against a known sample first, *"judged on correctness, never on row count"*. Taking 111
+calls without that measurement is trading a known saving against an unmeasured risk of
+quietly deleting qualified prospects — and the phase is specifically built so that failure
+looks like a thin market rather than a bug.
+
+**The A/B is the unlock**, and it is cheap: ~20 prospects with known verdicts, run at batch
+1 and batch 8, compared on `validated` / `disqualifiers_hit` agreement. If accuracy holds,
+111 calls follow.
+
+---
+
+## 7. Batch size — measured, not assumed (§10)
 
 §4 anchors fused multi-group prompts at **5** because *"that is the only size anyone has
 measured"*, and §10 asks for 5 / 8 / 10 on ~20 known entities, judged on:
@@ -126,19 +170,25 @@ measured"*, and §10 asks for 5 / 8 / 10 on ~20 known entities, judged on:
 - entities silently dropped from the response
 
 **Until that runs, 5 stands.** Shipping 8 on the assumption that bigger is cheaper is the
-failure §4 names explicitly: an oversized batch degrades *silently*, and both failure modes look
-like "the data wasn't out there".
+failure §4 names explicitly. The reconciliation added in this work is what makes the
+measurement possible — `enrichment_unmatched` / `contacts_unmatched` count the third
+criterion directly.
 
 ---
 
-## 7. Self-lint (§9) — current state
+## 8. Self-lint (§9) — after the change
 
-- [x] A generative phase merges multiple targets into one call — **no**, correct today
-- [ ] Two or more enriching phases share an entity set and are not fused — **YES, set C1: 3 lanes**
-- [x] Fused batch above 5 without measurement — n/a, nothing is fused yet
-- [ ] Batched prompt missing numbered list / exact-name rule / one-object-per-entity /
-      empty-array-not-omission — **all four missing; nothing is batched**
-- [ ] No post-parse name reconciliation for a batched phase — **none exists**
-- [x] §8 table absent — **this document**
+- [x] A generative phase merges multiple targets into one call — **no**
+- [x] Two or more enriching phases share an entity set and are not fused — **fixed**; the
+      three enrichment lanes are one call. `contacts` and `validation` are separate sets,
+      each held with a written reason above
+- [x] A fused multi-group prompt uses a batch size above 5 without measurement — **no**, 5
+- [x] Any batched prompt missing the numbered list, exact-name rule, one-object-per-entity
+      or empty-array-not-omission — **no**; all four come from one shared module so they
+      cannot drift between phases
+- [x] No post-parse name reconciliation for a batched phase — **fixed**, and a miss is
+      reported rather than read as "found nothing"
+- [x] The call-count and cost table is absent — **this document**
 
-Four of six fail. All four are the same change.
+**Six of six pass.** Two items remain as measurements rather than defects: the validation
+A/B (§6) and the batch-size sweep (§10).
