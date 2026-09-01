@@ -65,9 +65,16 @@ public sources. Do not invent facts about the prospect.
 
 Return a JSON array with exactly one object:
 [{{"validated": true|false,
-   "signals_found": ["<signal text you judged present>"],
+   "signals_found": [{{"signal_type": "<short snake_case label naming WHICH of the seller's signals above this is>",
+                      "signal_date": "<YYYY-MM-DD the EVENT happened, or null if you cannot find it>",
+                      "signal_description": "<one sentence quoting what you found>"}}],
    "disqualifiers_hit": ["<disqualifier text that applies>"],
    "reasoning": "<one or two sentences>"}}]
+
+`signal_date` is the date the EVENT itself occurred — when the thing the seller is
+looking for actually happened — never today's date and never the date you searched. If
+the evidence does not state when it happened, use null: an undated signal still counts
+as present, and guessing a date would make a stale lead look current.
 
 `validated` is false if any disqualifier applies, or if no in-market signal is
 present. Return only the JSON array."""
@@ -142,15 +149,59 @@ Return a JSON array of exactly {count} objects, one per organization:
   "n": <the organization's number from the list above>,
   "company_name": "<its exact official name, copied from the list>",
   "validated": true|false,
-  "signals_found": ["<signal text you judged present>"],
+  "signals_found": [{{"signal_type": "<short snake_case label naming WHICH of the seller's signals above this is>",
+                     "signal_date": "<YYYY-MM-DD the EVENT happened, or null if you cannot find it>",
+                     "signal_description": "<one sentence quoting what you found>"}}],
   "disqualifiers_hit": ["<disqualifier text that applies>"],
   "reasoning": "<one or two sentences>"
 }}
+
+`signal_date` is the date the EVENT occurred, never today's date and never the date you
+searched. If the evidence does not state when it happened, use null: an undated signal
+still counts as present, and guessing a date would make a stale lead look current.
 
 {batch_rules}
 
 `validated` is false for a prospect if any disqualifier applies to IT, or if no in-market
 signal is present for IT. Return only the JSON array."""
+
+
+#: Keys a signal row may carry. Kept to a fixed set so the shape is a contract rather
+#: than whatever the model returned, matching how VALIDATION_FIELDS treats the verdict.
+SIGNAL_KEYS = ("signal_type", "signal_date", "signal_description")
+
+
+def _coerce_signals(raw: Any) -> list[dict[str, Any]]:
+    """Normalise `signals_found` to a list of signal OBJECTS.
+
+    🔑 **Both shapes are accepted on purpose, and neither is a fallback that hides a
+    problem.** A bare string is what this phase emitted before dates existed, and what a
+    model still returns when it ignores the shape. Dropping those would silently discard a
+    real finding; promoting them to `{"signal_description": <text>}` with a null date keeps
+    the text — which the `aiAnalysis` quote is built from — while leaving the row correctly
+    UNDATED.
+
+    That distinction is the whole point. `fresh_signals` needs a date to judge recency, so
+    an undated row can never open the buying-window gate. A string therefore counts as a
+    signal being present without ever making a stale lead look current, which is exactly
+    the behaviour the prompt asks for when the evidence gives no date.
+
+    ⚠️ Nothing invents a date. `parse_signal_date` refuses a bare year for the same reason:
+    a guessed month does not degrade the answer, it changes it.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            row = {k: item.get(k) for k in SIGNAL_KEYS if item.get(k) is not None}
+            # A row with no description and no type carries nothing a human or the gate
+            # can use, even if it parsed.
+            if row:
+                out.append(row)
+        elif isinstance(item, str) and item.strip():
+            out.append({"signal_description": item.strip()})
+    return out
 
 
 def _as_lines(value: Any) -> str:
@@ -291,7 +342,7 @@ def validate_prospects(
         verdict = verdict or {}
         data = {
             "validated": verdict.get("validated") if verdict else None,
-            "signals_found": verdict.get("signals_found") or [],
+            "signals_found": _coerce_signals(verdict.get("signals_found")),
             "disqualifiers_hit": verdict.get("disqualifiers_hit") or [],
             "reasoning": verdict.get("reasoning") or "",
         }
