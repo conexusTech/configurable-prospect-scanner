@@ -158,6 +158,11 @@ def main() -> int:
         "what has already been paid for",
     )
     ap.add_argument(
+        "--resume",
+        action="store_true",
+        help="reuse verdicts already in <out>.judged.partial instead of re-buying them",
+    )
+    ap.add_argument(
         "--stages-from",
         help="a previous --out file. Reuses its judged stages instead of re-judging, so "
         "a scoring fix costs nothing. Judgement is the only paid step here; re-buying it "
@@ -234,9 +239,19 @@ def main() -> int:
         # And a wedge inside one chunk keeps every chunk already paid for, instead of
         # discarding the whole spend on a kill.
         judged: dict[str, dict[str, Any]] = {}
+        # Resume from the judgement partial. Judgement is ungrounded and fast when it runs
+        # alone (25 in 72s), but it collapses when a grounded job is competing for the same
+        # key — one chunk that took 72s solo took over 7 minutes alongside one. So being
+        # able to stop it, yield the key, and pick it up again is what makes serialising
+        # the two jobs cheap instead of wasteful.
+        partial_path = Path(args.out + ".judged.partial")
+        if args.resume and partial_path.exists():
+            judged = json.loads(partial_path.read_text(encoding="utf-8"))
+            print(f"  resuming: {len(judged)} already judged", flush=True)
+        todo = [r for r in rows if r["id"] not in judged]
         step = max(1, args.chunk)
-        for i in range(0, len(rows), step):
-            batch = rows[i : i + step]
+        for i in range(0, len(todo), step):
+            batch = todo[i : i + step]
             t0 = time.time()
             judged.update(
                 judge_prospects(
@@ -249,8 +264,9 @@ def main() -> int:
                     parse_json_array=als.parse_json_array,
                 )
             )
+            partial_path.write_text(json.dumps(judged), encoding="utf-8")
             print(
-                f"    {min(i + step, len(rows))}/{len(rows)} judged "
+                f"    {len(judged)}/{len(rows)} judged "
                 f"({time.time() - t0:.0f}s for {len(batch)})",
                 flush=True,
             )
