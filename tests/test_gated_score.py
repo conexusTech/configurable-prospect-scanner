@@ -225,6 +225,21 @@ class TestStrengthMatchesTheSignalTypeToo:
         sig = {"signal_class": "rfp_active", "signal_type": "groundbreaking_announcement"}
         assert band_signal_strength(sig, self.CFG) == 8
 
+    def test_an_empty_class_key_never_matches_an_unclassified_signal(self):
+        """A pre-existing hole, found by the audit pass rather than by a failure.
+
+        `signal_class` is "" for every row written before it was attached at enrichment
+        (2026-08-31). An empty key in a config would match all of them through the
+        `cls in classes` lookup and pay its weight to signals that were never classified
+        at all — and to nothing else, so it would look like a working band.
+        """
+        from aeo.gated_score import band_signal_strength
+
+        cfg = {"max": 8, "classes": {"": 7, "rfp_active": 8}}
+        assert band_signal_strength({"signal_type": ""}, cfg) == 4  # midpoint, not 7
+        assert band_signal_strength({"signal_type": "rfp_active"}, cfg) == 8
+        assert band_signal_strength({"signal_class": "rfp_active"}, cfg) == 8
+
     def test_a_type_the_config_never_named_still_scores_the_midpoint(self):
         # The discriminator. Without this the fallback could match anything and the two
         # tests above would pass on a band that pays 6 for every signal on earth.

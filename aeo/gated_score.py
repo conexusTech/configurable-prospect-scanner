@@ -220,14 +220,25 @@ def band_signal_strength(sig: Optional[dict[str, Any]], cfg: dict[str, Any]) -> 
     if not sig:
         return 0  # no signal at all is a real absence, not an unusable class
     cls = str(sig.get("signal_class") or "")
-    if cls in classes:
+    # `cls` is "" for every row written before `signal_class` was attached at enrichment
+    # (2026-08-31), so an empty key in a config would silently match all of them and pay
+    # its weight to signals that were never classified at all. Require a real class.
+    if cls and cls in classes:
         return max(0, min(top, int(classes[cls])))
     # Normalised on both sides, for the same reason `signal_class.normalize` exists: the
     # model writes `groundbreaking announcement` and a config declares
     # `groundbreaking_announcement`, and an underscore should not decide a score.
-    raw = _norm(sig.get("signal_type")).replace(" ", "_")
+    def _key(v: Any) -> str:
+        return _norm(v).replace(" ", "_")
+
+    raw = _key(sig.get("signal_type"))
+    # 🔑 Bail BEFORE the scan, not inside it. An empty type has nothing to match, and a
+    # config key that normalised to empty (`""`, `"---"`) would otherwise match it and
+    # hand a weight to a signal carrying no type at all.
+    if not raw:
+        return top // 2
     for key, weight in classes.items():
-        if _norm(key).replace(" ", "_") == raw and raw:
+        if _key(key) == raw:
             return max(0, min(top, int(weight)))
     return top // 2
 
