@@ -45,6 +45,7 @@ import io
 import json
 import os
 import sys
+import time
 from collections import Counter
 from datetime import date
 from pathlib import Path
@@ -150,6 +151,13 @@ def main() -> int:
     ap.add_argument("--as-of", help="YYYY-MM-DD, default today")
     ap.add_argument("--provider", default="gemini")
     ap.add_argument(
+        "--chunk",
+        type=int,
+        default=25,
+        help="judge in chunks of this size, so progress is visible and a wedge keeps "
+        "what has already been paid for",
+    )
+    ap.add_argument(
         "--stages-from",
         help="a previous --out file. Reuses its judged stages instead of re-judging, so "
         "a scoring fix costs nothing. Judgement is the only paid step here; re-buying it "
@@ -215,15 +223,37 @@ def main() -> int:
         provider = als._pick_provider(args.provider, mock=False, dry_run=False)
         pconf = als._provider_config(tool_context, args.provider)
         print(f"\n{len(rows)} prospects · judging (ungrounded) then scoring (free)\n")
-        judged = judge_prospects(
-            rows,
-            pipeline=pipeline,
-            product_description=str(config.get("product_description") or ""),
-            today=today,
-            provider=provider,
-            provider_config=pconf,
-            parse_json_array=als.parse_json_array,
-        )
+        # 🔑 Chunked, for two reasons that both cost real time to learn.
+        #
+        # `judge_prospects` prints nothing until it returns, so a 159-prospect call is
+        # indistinguishable from a wedged one for however long it runs — and one DID wedge
+        # for 40 minutes against a path measured at 15s per 3 prospects, because three
+        # concurrent jobs had driven the shared key into retry backoff. A slow phase and a
+        # dead one must not look the same from outside.
+        #
+        # And a wedge inside one chunk keeps every chunk already paid for, instead of
+        # discarding the whole spend on a kill.
+        judged: dict[str, dict[str, Any]] = {}
+        step = max(1, args.chunk)
+        for i in range(0, len(rows), step):
+            batch = rows[i : i + step]
+            t0 = time.time()
+            judged.update(
+                judge_prospects(
+                    batch,
+                    pipeline=pipeline,
+                    product_description=str(config.get("product_description") or ""),
+                    today=today,
+                    provider=provider,
+                    provider_config=pconf,
+                    parse_json_array=als.parse_json_array,
+                )
+            )
+            print(
+                f"    {min(i + step, len(rows))}/{len(rows)} judged "
+                f"({time.time() - t0:.0f}s for {len(batch)})",
+                flush=True,
+            )
         print(f"  judged {len(judged)} of {len(rows)}")
     if not judged:
         raise SystemExit("judgement returned nothing — refusing to report scores on stale stages")

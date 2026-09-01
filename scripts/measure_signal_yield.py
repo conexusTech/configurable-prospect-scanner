@@ -37,6 +37,7 @@ import io
 import json
 import os
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -71,6 +72,7 @@ def main() -> int:
     ap.add_argument("--config", required=True, help="the skill config JSON")
     ap.add_argument("--limit", type=int, default=20, help="sample size (0 = all)")
     ap.add_argument("--provider", default="gemini")
+    ap.add_argument("--chunk", type=int, default=25, help="validate in chunks, saving each to <out>.partial so a kill costs the chunk in flight rather than the run")
     ap.add_argument(
         "--out",
         help="save the verdicts here. One paid pass then serves BOTH the measurement and "
@@ -96,16 +98,40 @@ def main() -> int:
         f"nothing will be written\n"
     )
 
-    out = validate_prospects(
-        rows,
-        validation_config=validation,
-        provider=provider,
-        provider_config=pconf,
-        parse_json_array=als.parse_json_array,
-        # 🔑 A heartbeat. Without one a slow phase and a wedged one are the same
-        # observation from outside — `map_bounded`'s own docblock says so.
-        log=lambda m: print(f"    {m}", flush=True),
-    )
+    # 🔑 Chunked, and each chunk saved as it lands.
+    #
+    # `validate_prospects` returns only when the whole book is done, so a 150-prospect call
+    # holds every paid verdict in memory until the end. One such run was killed at ~62
+    # minutes against a path measured at ~5s per prospect — three concurrent jobs had driven
+    # the shared key into retry backoff — and every grounded call it had already bought went
+    # with it. Writing each chunk means a kill costs the chunk in flight, not the run.
+    #
+    # It also gives a slow run a heartbeat that distinguishes it from a dead one, which the
+    # `log=` callback alone did not, because the caller could not see partial results.
+    out: list[dict[str, Any]] = []
+    step = max(1, args.chunk)
+    for i in range(0, len(rows), step):
+        batch = rows[i : i + step]
+        t0 = time.time()
+        out.extend(
+            validate_prospects(
+                batch,
+                validation_config=validation,
+                provider=provider,
+                provider_config=pconf,
+                parse_json_array=als.parse_json_array,
+                log=lambda m: print(f"    {m}", flush=True),
+            )
+        )
+        print(
+            f"  == {len(out)}/{len(rows)} validated ({time.time() - t0:.0f}s "
+            f"for {len(batch)})",
+            flush=True,
+        )
+        if args.out:
+            io.open(args.out + ".partial", "w", encoding="utf-8").write(
+                json.dumps(out, indent=1)
+            )
 
     judged = [r for r in out if (r.get("validation_data") or {}).get("validated") is not None]
     with_sig, with_date, dated_rows = 0, 0, []
