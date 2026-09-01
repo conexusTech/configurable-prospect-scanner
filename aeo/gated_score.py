@@ -188,12 +188,32 @@ def select_signal(
 # ─────────────────────────── bonus bands ───────────────────────────
 
 def band_signal_strength(sig: Optional[dict[str, Any]], cfg: dict[str, Any]) -> int:
-    """0-8 from the canonical class.
+    """0-8 from the canonical class, falling back to the signal's own type.
 
     🔴 **An unusable class scores the MIDPOINT and is logged — never 0.** "We could not
     classify this" is not evidence of weakness, and scoring it 0 bends a data rule to
     protect an invariant. It is why exactly-80 is unreachable and why that requirement
     was dropped: the practical minimum is 81, or 83 with size unknown.
+
+    🔑 **The `signal_type` fallback is what makes this band work outside one vertical.**
+    `signal_class` comes from `signal_class.SIGNAL_CLASSES`, a closed seven-value enum
+    written for the EAP/benefits vocabulary: `benefits_change`, `broker_carrier_change`,
+    `workforce_change`. Measured on real books:
+
+      - consulting (property development): **37 of 46** signals classify to `None` —
+        `groundbreaking_announcement`, `permit_and_zoning_filings`, `zoning_approval`
+        are simply not in the enum, and no amount of config can name a class the
+        classifier never emits;
+      - MYgroup, whose vertical the enum WAS written for: the classifier is fine (13 of
+        204 unclassified) but its config keyed the band on `contract_renewal`,
+        `provider_change`, `broker_change` — six of seven keys absent from the enum, so
+        **196 of 204 signals fell to the midpoint** on a band that read as fully
+        configured.
+
+    Matching the type as well lets a skill declare the vocabulary its own vertical
+    actually produces, without editing a shared enum on behalf of one customer. The class
+    is still tried first, so every existing config keeps its exact behaviour; this can
+    only turn a midpoint into a weight the config explicitly asked for.
     """
     classes: dict[str, int] = cfg.get("classes") or {}
     top = int(cfg.get("max", 8))
@@ -202,6 +222,13 @@ def band_signal_strength(sig: Optional[dict[str, Any]], cfg: dict[str, Any]) -> 
     cls = str(sig.get("signal_class") or "")
     if cls in classes:
         return max(0, min(top, int(classes[cls])))
+    # Normalised on both sides, for the same reason `signal_class.normalize` exists: the
+    # model writes `groundbreaking announcement` and a config declares
+    # `groundbreaking_announcement`, and an underscore should not decide a score.
+    raw = _norm(sig.get("signal_type")).replace(" ", "_")
+    for key, weight in classes.items():
+        if _norm(key).replace(" ", "_") == raw and raw:
+            return max(0, min(top, int(weight)))
     return top // 2
 
 

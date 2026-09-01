@@ -190,6 +190,49 @@ class TestBands:
         out = run(NC, [], "4 - Active Pursuit")
         assert out["bands"]["signal_strength"] == 0
 
+
+class TestStrengthMatchesTheSignalTypeToo:
+    """The band must work for a vertical the classifier's enum was not written for.
+
+    `SIGNAL_CLASSES` is a closed seven-value enum in the EAP/benefits vocabulary. Measured
+    on real books: consulting (property development) classifies 37 of 46 signals to
+    `None`, and MYgroup — whose vertical the enum WAS written for — had 196 of 204 signals
+    fall to the midpoint because its config keyed the band on names absent from the enum.
+    Both are the same defect wearing different clothes: a band that reads as configured
+    and pays a flat midpoint.
+    """
+
+    CFG = {"max": 8, "classes": {"rfp_active": 8, "groundbreaking_announcement": 6}}
+
+    def test_a_config_class_matching_the_signal_type_is_honoured(self):
+        from aeo.gated_score import band_signal_strength
+
+        assert band_signal_strength({"signal_type": "groundbreaking_announcement"}, self.CFG) == 6
+
+    def test_underscores_and_spaces_are_the_same_signal(self):
+        # The model writes "groundbreaking announcement"; a config declares the
+        # underscored form. An underscore must not decide a score — the same reasoning
+        # that put `normalize` in `signal_class`.
+        from aeo.gated_score import band_signal_strength
+
+        assert band_signal_strength({"signal_type": "groundbreaking announcement"}, self.CFG) == 6
+
+    def test_the_canonical_class_still_wins_over_the_type(self):
+        # Backward compatibility, and the reason this can only ever raise a midpoint to a
+        # weight the config asked for: every existing config keeps its exact behaviour.
+        from aeo.gated_score import band_signal_strength
+
+        sig = {"signal_class": "rfp_active", "signal_type": "groundbreaking_announcement"}
+        assert band_signal_strength(sig, self.CFG) == 8
+
+    def test_a_type_the_config_never_named_still_scores_the_midpoint(self):
+        # The discriminator. Without this the fallback could match anything and the two
+        # tests above would pass on a band that pays 6 for every signal on earth.
+        from aeo.gated_score import band_signal_strength
+
+        assert band_signal_strength({"signal_type": "zoning_approval"}, self.CFG) == 4
+        assert band_signal_strength({"signal_type": ""}, self.CFG) == 4
+
     def test_contact_points_are_additive_and_capped(self):
         full = {**NC, "contact_phone": "1"}
         assert run(full, FRESH_RFP, "4 - Active Pursuit")["bands"]["confirmed_contact"] == 4
