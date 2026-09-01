@@ -79,6 +79,7 @@ def main() -> int:
         "a later write — without it, re-validating to persist means paying twice for "
         "calls already made.",
     )
+    ap.add_argument("--resume", action="store_true", help="skip prospects already in <out>.partial")
     args = ap.parse_args()
 
     _load_env()
@@ -88,6 +89,26 @@ def main() -> int:
         raise SystemExit("--rows must be a non-empty JSON array")
     if args.limit:
         rows = rows[: args.limit]
+
+    # 🔑 Resume from the partial, so stopping a run stops costing money.
+    #
+    # Grounded validation is the expensive phase and the shared key serialises it at
+    # roughly 2 calls a minute regardless of concurrency, so a whole book is an hour-plus
+    # of wall time. Without resume, every stall forces a choice between waiting on a run
+    # that may be wedged and throwing away everything it has already bought. With it,
+    # stopping is free and restarting picks up where it left off.
+    done: list[dict[str, Any]] = []
+    if args.resume and args.out:
+        partial = Path(args.out + ".partial")
+        if partial.exists():
+            done = json.loads(partial.read_text(encoding="utf-8"))
+            seen = {r.get("prospect_id") for r in done}
+            before = len(rows)
+            rows = [r for r in rows if r["id"] not in seen]
+            print(
+                f"resuming: {len(done)} already validated, {len(rows)} of {before} left\n",
+                flush=True,
+            )
 
     validation = config.get("validation") or {}
     provider = als._pick_provider(args.provider, mock=False, dry_run=False)
@@ -108,7 +129,9 @@ def main() -> int:
     #
     # It also gives a slow run a heartbeat that distinguishes it from a dead one, which the
     # `log=` callback alone did not, because the caller could not see partial results.
-    out: list[dict[str, Any]] = []
+    # Seeded with what a resume already loaded, or the final file would contain only the
+    # rows validated in THIS run — dropping every verdict the resume was meant to save.
+    out: list[dict[str, Any]] = list(done)
     step = max(1, args.chunk)
     for i in range(0, len(rows), step):
         batch = rows[i : i + step]
@@ -123,9 +146,13 @@ def main() -> int:
                 log=lambda m: print(f"    {m}", flush=True),
             )
         )
+        # Denominator is the WHOLE book, not just this run's share. Under `--resume`,
+        # `rows` holds only what is left, so `len(out)/len(rows)` would print something
+        # like "60/90" — a fraction of two different populations that reads as progress
+        # and is not.
         print(
-            f"  == {len(out)}/{len(rows)} validated ({time.time() - t0:.0f}s "
-            f"for {len(batch)})",
+            f"  == {len(out)}/{len(done) + len(rows)} validated "
+            f"({time.time() - t0:.0f}s for {len(batch)})",
             flush=True,
         )
         if args.out:
