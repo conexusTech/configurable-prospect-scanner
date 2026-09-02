@@ -1,0 +1,27 @@
+name: gate
+
+# CI runs the repo's own gate entry point, never its own list of steps. A CI list that
+# drifts from the local gate means one of them is lying, and the drift is silent.
+
+on:
+  pull_request:
+    branches: [master, develop]
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: pip install pytest httpx
+      - name: Prove the checker's rules still fire
+        run: node scripts/okf-check.test.mjs
+      - name: gate
+        run: bash scripts/gate.sh
