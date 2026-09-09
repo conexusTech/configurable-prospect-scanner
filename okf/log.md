@@ -59,30 +59,51 @@
   carry seven. Corrected, and the ruling recorded in its `$comment`. If it is meant to be the
   reference template, something should read it; if not, it should go.
 
-- **Learning** — **The buying-window gate admits every rung, by decision and not by defect.**
-  PO ruling 2026-09-01 (recorded in `aeo-backend/.temp/verify/propose-gated-generic.js:196`):
-  the fresh signal decides in-market, and a recently-decided account is still worth
-  surfacing. Measured at the time as 36 -> 63 qualified on MYgroup; re-measured independently
-  on 2026-09-09 as 63 of 69, which agrees. Anyone re-deriving this from the config alone will
-  read a gate that can never exclude and conclude "defect" — the ruling is the missing half,
-  and it lives in a gitignored scratch script.
+- **Learning** — 🔁 **The all-rungs buying window was real, ruled, and then REVERSED — all on
+  2026-09-09.** It was a genuine PO ruling of 2026-09-01, committed as `aeo-backend` 30b2fec
+  and taken against a real measurement (36 -> 63 qualified on MYgroup; re-measured
+  independently as 63 of 69, which agrees). The PO reversed it after seeing it applied to a
+  rescored book. `window_stages` is rungs 1-5 again.
 
-- **Learning** — **A consequence of that ruling nothing else states, and it is INTENDED.**
-  `stage` appears in `gated_score.py` only inside `in_buying_window`. It is binary admission
-  and feeds no bonus band, so ranking cannot distinguish an active deal from a decided one.
-  On MYgroup's last run AP Emissions Technologies ("7 - Too Late") re-scores to 92, above
-  Kriya Therapeutics ("4 - Active Pursuit") at 89.
+  ⚠️ **This entry asserted three different things in one day, and the sequence is the
+  lesson.** First: the gate looked like a defect, read from the config alone. Second: a
+  gitignored comment claimed a PO ruling, so it was recorded here as "by decision and not by
+  defect" — correct conclusion, but on a source with no provenance. Third: a broader search
+  found the ruling committed in two other repos, so the conclusion held for a better reason
+  than the one first given. Fourth: the PO reversed it. 🔑 **The failure was searching for
+  one phrasing** — "EVERY rung", "terminal ones included" — and concluding from its absence
+  that no record existed. `aeo-backend` said "ALL SEVEN stages" and the skill-builder test
+  said "defaults to ALL". **A negative result from a grep is evidence about the grep.**
 
-  ✅ **Raised with the PO on 2026-09-09 and declined: no stage term in the bonus.** So the
-  ruling means what it says — a fresh signal decides in-market, and rank follows signal
-  strength and recency rather than deal stage. **Closed, not open.** Recorded because
-  anyone re-deriving this from the code will read it as a defect and re-raise it, which is
-  precisely what happened on 2026-09-09 before the ruling was found; it lives in a
-  gitignored scratch script and nowhere a reader would look.
+  🔑 **And the decision unit mattered more than the decision.** "36 to 63 qualified" reads
+  like an improvement. The same fact as "43% of MYgroup's qualified list, and 79% of Matrix
+  Frame's, are `7 - Too Late`" is what triggered the reversal. Price a scoring change as a
+  share of the list somebody has to work, not as a delta.
 
-  ⚠️ **The one thing that would reopen it** is evidence rather than opinion: a salesperson
+- **Learning** — **`stage` feeds no bonus band, only the gate**, so within the window rank
+  follows signal strength and recency rather than deal stage. `stage` appears in
+  `gated_score.py` only inside `in_buying_window`.
+
+  ✅ **A stage term in the bonus was raised with the PO on 2026-09-09 and declined, and the
+  window reversal later that day made the decline better-founded rather than worse.** While
+  every rung was in the window, "rank cannot tell an active deal from a decided one" was a
+  real defect that a bonus term would have papered over — the honest fix was always to stop
+  admitting decided deals. With `window_stages` back to rungs 1-5, every admitted lead is
+  legitimately in-window, so ranking on signal strength and recency is defensible and the
+  declined term is simply unnecessary. **Fixing the gate removed the reason to want it.**
+
+  ⚠️ **This entry originally read "a consequence of that ruling … and it is INTENDED", and
+  cited AP Emissions Technologies ("7 - Too Late") re-scoring to 92 above Kriya Therapeutics
+  ("4 - Active Pursuit") at 89 as intended behaviour.** Under the reverted window AP
+  Emissions is not admitted at all. The example was correct; calling it intended was not.
+
+  🔑 **The reopening condition named here was met within hours of being written.** It said:
+  *"the one thing that would reopen it is evidence rather than opinion — a salesperson
   working the list top-down and wasting time on decided accounts. That is an observation
-  nobody has made yet, and it is the only kind that should overturn a deliberate call.
+  nobody has made yet."* The PO made exactly that observation the same day, and it overturned
+  the ruling. Worth keeping as evidence the mechanism works: a named, falsifiable reopening
+  condition is what let a report of "the scoring seems off" resolve to a specific decision
+  instead of a re-litigation.
 
 - **Learning** — MYgroup's stored runs ARE re-scorable and the question is now purely a
   decision, not a feasibility problem. Both 2026-08-27 runs (69 scored rows) carry dated
@@ -130,11 +151,16 @@
   instances are kept visible in the file, and it now points at the roadmap row and this log
   rather than asserting anything itself.
 
-- **Learning** — **Re-judging buys no score change under the current gate, so never pay
-  for it as part of a rescore.** `pipeline_status` appears in `gated_score.py` only inside
-  `in_buying_window`; the PO's 2026-09-01 ruling put every rung in the window, and no bonus
-  band reads stage. So stage is binary admission that admits everything. The paid
-  `rejudge_and_score.py` path would have cost real money and moved not one score.
+- **Learning** — **Re-judging buys no score change, so never pay for it as part of a
+  rescore.** `pipeline_status` appears in `gated_score.py` only inside `in_buying_window`
+  and no bonus band reads stage, so within the window rank follows signal strength and
+  recency, not deal stage. The paid `rejudge_and_score.py` path would have cost real money
+  and moved not one score. ⚠️ **This entry originally justified that with "the ruling put
+  every rung in the window, so stage admits everything" — which stopped being true when the
+  window was reverted to rungs 1-5 the same day.** The conclusion survives on the narrower
+  and more durable reason above: stage feeds no band. **After the reversal stage DOES reject
+  again**, so a re-judge can change whether a lead is admitted at all — it still cannot move
+  the score of one already admitted.
 
 - **Learning** — **Three defects in `apply-rescore.js`, all found before it ran, all in the
   same class: the writer and the engine disagreeing about a shape.** (1) It reads
