@@ -1,31 +1,51 @@
 """Phase 2b — PLANNING ONLY. Nothing here re-scores anything, and nothing calls it.
 
-🔴 **NOT APPROVED, AND NOT A RULING. Forward-only is the standing decision.**
+✅ **APPROVED AND USED. The PO reversed forward-only on 2026-09-09**, and MYgroup's two
+2026-08-27 runs have been re-scored — 69 rows, **local database only, production
+untouched.** The numbers are on the `rescore-mygroup-gated-runs` roadmap row.
 
-The PO ruled on 2026-08-31: *"we do not need to rescore anything — what we need to fix is
-the future prospects' scoring."* Later, asked about the mixed-scale consequence, they said
-a re-scoring phase could come *after* the development. That is permission to think about
-it later, **not** permission to build or run it, and this module must not be read as the
-second thing.
+⚠️ **This paragraph said "NOT APPROVED, AND NOT A RULING" until 2026-09-09.** That was
+right for nine days: the PO ruled on 2026-08-31 *"we do not need to rescore anything —
+what we need to fix is the future prospects' scoring"*, and when later asked about the
+mixed-scale consequence said a re-scoring phase could come *after* the development —
+permission to think about it, not to run it. Reversed since, so the banner had become
+wrong in the opposite direction, which is worse than wrong in the original one: a reader
+would refuse work the PO has asked for, and would refuse it citing this file.
 
-⚠️ An earlier version of this docblock said "Ruled 2026-08-31 … forward-only was the rule
-UNTIL the mixed-scale consequence was weighed", which asserted a reversal the PO never
-made. It is corrected here rather than quietly deleted, because a file claiming its own
-authorisation is exactly the kind of drift nobody re-reads for.
+⚠️ **A still earlier version asserted a reversal the PO had NOT yet made.** That is
+recorded rather than deleted, and it is why this history is kept in full: the module's
+own warning — *a file claiming its own authorisation is exactly the kind of drift nobody
+re-reads for* — has now been demonstrated in both directions by this very docblock. The
+authorisation is not the file's to assert. It lives in the roadmap row and in
+`okf/log.md`, and this paragraph only points at them.
+
+🔴 **What has NOT changed: this module still writes nothing.** It is the pure half. The
+re-score above was applied by `aeo-backend/.temp/verify/apply-rescore.js`, which is a
+different file in a different repo, gitignored, carrying its own backup / census /
+rollback chain. Approval to re-score is not approval for this module to grow a database
+layer — the separation is what made the decision to write a separate, reviewable act.
 
 **What this module is:** the pure, side-effect-free half — given rows and a config it
 returns what WOULD change, and refuses outright when the vertical cannot support the gate.
-It exists so that if the PO does ask for a re-score, the cost of answering "what would it
-do?" is a function call rather than a project. `aeo/rescore.py` is imported by its tests
-and by nothing else; there is no database layer and no CLI, so it cannot be executed
+It exists so that the cost of answering "what would a re-score do?" is a function call
+rather than a project — which is exactly how it was used on 2026-09-09, three times,
+before anything was written. `aeo/rescore.py` is imported by its tests and by the offline
+scripts and by nothing else; there is no database layer and no CLI, so it cannot be executed
 against real data even by accident.
 
-**The argument it would have to answer, recorded so the decision is informed:** with
-nothing re-scored, one org's list holds a good lead at 52 beside an equally good lead at
-93 **permanently**, because a later run SKIPS a company it has already seen
+**The argument that carried the decision, kept because its central fact still holds:**
+with nothing re-scored, one org's list holds a good lead at 52 beside an equally good lead
+at 93 **permanently**, because a later run SKIPS a company it has already seen
 (`runtime-scan-events.service.ts` — "SKIP, not update") rather than refreshing it. Old
-scores never age out on their own. That is a real cost of forward-only, and it is the
-PO's to weigh — not this module's to pre-empt.
+scores never age out on their own, so re-running is not a substitute for re-scoring. That
+was recorded here as the PO's to weigh; it was weighed on 2026-09-09 and MYgroup was
+re-scored.
+
+⚠️ **The fact outlives that decision, and applies to the four verticals still on the
+legacy scale.** Their lists carry the same permanent mixed scale, and no future run will
+clear it. Whether they get re-scored is a separate PO call per vertical — and for the four
+carrying undated `signals_found` it is not available at all until the scanner emits dated
+signals for them, which `plan_rescore` refuses to paper over.
 
 🔴 **This reads stored rows and performs NO discovery.** No search, no browser, no
 grounded request — the inputs are the `validation_data` and `discovery_data` the original
