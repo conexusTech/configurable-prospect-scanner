@@ -256,3 +256,51 @@
   fresh one still admits, an unparseable date is unknown rather than future, and
   `age_months` still clamps. **A test class where every test fails without the fix has no
   control in it**, and would pass just as well if the gate closed on everyone.
+
+- **Learning** — 🔴 **The review pass ran AFTER landing, and it found a blocker that
+  invalidated an assurance repeated six times: the production backups had no working
+  restore.** `sync-rescore-to-prod.js` writes `{target, rows:[...]}`; the only restore tool,
+  `restore-rescore.js`, reads `raw.prospects` and exits 3 — so all nine production restore
+  points were unreadable. Forcing one through would have written `ai_analysis` and
+  `pipeline_updated_at` (absent from the backup, so both to NULL — real data loss) while
+  never restoring `priority_band` or `rank`, the columns the sync actually wrote. Six
+  production writes were made while "restore point kept" was being said. Fixed by
+  `restore-sync-backup.js`, which derives its writable column set FROM the backup file and
+  refuses a file of the wrong shape — and **proven by a round-trip on 69 real rows in both
+  directions** rather than asserted. ⚠️ **The process lesson is the ordering:** gates and
+  self-written tests are not a review, and the methodology puts the review before landing
+  for exactly this reason.
+
+- **Learning** — ⚠️ **The production-writing tools live in `.temp/verify`, gitignored, so
+  they cannot be committed, reviewed, CI-tested or caught by a PR** — and one has now
+  written to production nine times. Every security blocker found traces to that. Worth its
+  own change: move this tooling into a repo with tests. Owner: Joe.
+
+- **Learning** — **`is_future` has a measured, deliberate limitation: a PARTIAL date whose
+  ambiguity window straddles the run date is admitted.** `_parse_partial` resolves to the
+  earliest instant, so `"2026-08"` on a 2026-08-27 run reads as past. The conservative
+  alternative (judge by the LATEST possible instant) was rejected on cost, not principle:
+  it would refuse every bare year in the run's own year, discarding up to twelve months of
+  legitimately past evidence. 🔑 **The two cases differ in kind** — a precise future date is
+  someone recording a date that has not arrived; a partial date is the validator finding a
+  real event it could not pin. Measured across both gated books: 68 year-month and 28
+  bare-year signals, 8 admitted leads carry a straddling one, and **0 leads' admission
+  depends on one**. Pinned by a test that names the trade-off, so a future "tidy-up" to
+  latest-instant fails loudly. Re-measure before changing it.
+
+- **Learning** — ⚠️ **The two scoring models now disagree about future-dated signals, on
+  purpose, and nothing said so.** `av_lead_scanner.py:1889` treats a future-dated row as
+  CURRENT for the legacy additive event axis — deliberately, pinned by
+  `test_a_future_date_is_current_not_out_of_window` — on the reasoning that a scheduled
+  renewal is a timing signal. Gated now refuses one at the gate. Both models are live and
+  opt-in per skill, so **a skill's behaviour toward a future date depends on which model it
+  runs**, in opposite directions. Not introduced by this change and not a defect in either
+  model; recorded because the divergence is invisible from inside either one.
+
+- **Learning** — **I over-counted my own controls.** The commit message for the future-date
+  fix said "four are controls"; one of the four was a byte-for-byte duplicate of a
+  pre-existing assertion in `TestBoundaryAsymmetry` and added no coverage. Replaced with a
+  test that pins the SPLIT — the same date credited by the band and refused by the gate,
+  which is the property neither half pins alone. **6 of 9 now fail without the fix, and the
+  three genuine controls are named.** A control that duplicates an existing test inflates
+  the appearance of rigour without adding any.

@@ -131,6 +131,27 @@ def is_future(raw: Any, today: date) -> bool:
 
     An unparseable date is **not** future: it is unknown, and `fresh_signals` already
     excludes it for having no age at all.
+
+    ⚠️ **KNOWN LIMITATION, measured and deliberate: a PARTIAL date whose ambiguity window
+    straddles today is judged not-future.** `_parse_partial` resolves to the earliest
+    instant, so on a run of 2026-08-27 `"2026-08"` reads as 2026-08-01 and `"2026"` as
+    2026-01-01 — both "past", even though the true unrecorded day could still be ahead.
+
+    The conservative alternative — judge a partial date by its LATEST possible instant —
+    was rejected on cost, not on principle: it would refuse every bare year in the run's
+    own year, discarding up to twelve months of legitimately past evidence to guard
+    against a day nobody recorded.
+
+    🔑 **The two cases are not the same kind of thing, and that is the justification.** A
+    PRECISE future date is somebody writing down a date that has not arrived — a
+    projection or an error, and refusing it is right. A PARTIAL date is the validator
+    finding a real event it could not pin, so reading it at its earliest instant is the
+    honest default.
+
+    Measured on 2026-09-09 across both gated books: 68 year-month and 28 bare-year
+    signals exist, 8 admitted leads carry a straddling one, and **0 leads' admission
+    depends on one** — every such lead also holds a full-date fresh signal. Re-measure
+    before changing this; the trade-off is only cheap while that 0 holds.
     """
     parsed = _parse_partial(raw)
     if parsed is None:

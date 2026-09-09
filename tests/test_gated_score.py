@@ -228,10 +228,40 @@ class TestAFutureDateCannotOpenTheGate:
         assert is_future("not-a-date", TODAY) is False
         assert is_future(None, TODAY) is False
 
-    def test_the_recency_band_still_credits_a_future_date_deliberately(self):
-        """Pins the SPLIT, not just the fix. If someone later 'tidies' this by making
-        `age_months` refuse a future date, this test fails and names the reason."""
-        assert age_months("2026-12-01", TODAY) == 0
+    def test_the_split_itself_the_band_credits_what_the_gate_refuses(self):
+        """Pins the SPLIT in one assertion pair, which is the thing neither half pins
+        alone.
+
+        ⚠️ An earlier version of this test asserted only `age_months(...) == 0`, which is
+        a byte-for-byte duplicate of `TestBoundaryAsymmetry`'s existing case and added no
+        coverage — it was counted as a control in the commit message and should not have
+        been. The split is what has no other home: the SAME date must be credited by the
+        band and refused by the gate, and a change to either half alone breaks it.
+        """
+        assert age_months("2026-12-01", TODAY) == 0, "the band must still credit it"
+        assert fresh_signals([{"signal_date": "2026-12-01"}], 18, TODAY) == [], (
+            "the gate must still refuse it"
+        )
+
+    def test_a_STRADDLING_partial_date_is_admitted_and_that_is_a_known_limitation(self):
+        """Pins the gap so it stays deliberate rather than becoming a surprise.
+
+        A partial date resolving to the earliest instant reads as past even when the true
+        unrecorded day could be ahead of today. `2026-08` on a 2026-08-27 run is admitted.
+
+        🔑 If someone later switches `is_future` to the LATEST possible instant, this test
+        fails and names the cost: every bare year in the run's own year would be refused,
+        discarding up to twelve months of legitimately past evidence. Measured 2026-09-09:
+        0 of 55 admitted leads depend on this, so the trade-off is currently cheap —
+        re-measure before changing it.
+        """
+        assert is_future("2026-08", TODAY) is False
+        assert is_future("2026", TODAY) is False
+        assert len(fresh_signals([{"signal_date": "2026-08"}], 18, TODAY)) == 1
+        # The control: once the partial date's EARLIEST instant is unambiguously ahead,
+        # it is refused like any other future date.
+        assert is_future("2026-09", TODAY) is True
+        assert fresh_signals([{"signal_date": "2026-09"}], 18, TODAY) == []
 
     def test_selected_from_fresh_is_False_when_only_a_future_signal_exists(self):
         out = run(NC, self.FUTURE, "4 - Active Pursuit")
