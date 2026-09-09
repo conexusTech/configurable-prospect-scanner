@@ -33,10 +33,22 @@ scan already paid for. That is the whole reason it is affordable: run `741b7b3b`
 **$58.08** across 223 calls and 3,183 grounded search queries, and re-scoring costs none
 of it. The only spend is the optional explanation pass, which is non-grounded.
 
-⚠️ **It does NOT generalise across verticals.** The gate needs dated signals, and only the
-healthcare skill has them — the other four carry `signals_found`, plain strings with no
-dates. Re-scoring those would fail every lead at G2 and cap it at the nurture ceiling,
-which is the inverse of the point. `plan_rescore` refuses a config that cannot gate.
+⚠️ **It does NOT generalise across every vertical.** The gate needs dated signals. Measured
+against stored rows on 2026-09-09, TWO skills emit them and four do not:
+
+    healthcare-prospect-scanner                switching_signal  69, dated 68
+    signage-and-visual-communications          switching_signal 149, dated 143
+    advertising / commercial-flooring / commercial-hvac / consulting        0, dated 0
+
+⚠️ An earlier version of this paragraph said "only the healthcare skill has them". That was
+true when written and is not any more — signage began emitting dated signals afterwards, so
+a reader taking it at face value would refuse a vertical that can in fact be re-scored. The
+count of skills that cannot ("the other four") is unchanged; which skills those are is not.
+
+The four carry `signals_found` as plain strings with no dates. Re-scoring those would fail
+every lead at G2 and cap it at the nurture ceiling, which is the inverse of the point.
+`plan_rescore` refuses a config that cannot gate — and it checks the DATA, not this list,
+so the guard stays correct however stale this paragraph gets.
 """
 
 from __future__ import annotations

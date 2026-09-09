@@ -45,3 +45,45 @@
   reproduces the same ranking and bands **from configuration alone**. That is the strongest
   evidence available that "many skills, one runtime" actually holds; it belongs committed.
   Owner: Joe.
+
+## 2026-09-09
+
+- **Update** — [/lib/scoring.md](/lib/scoring.md) concepts read; two stale claims corrected
+  in `aeo/gated_config_healthcare.json` and `aeo/rescore.py`. Docs and one orphaned config
+  document only: no statement, no engine behaviour, and no live config was touched.
+
+- **Learning** — **`aeo/gated_config_healthcare.json` is referenced by nothing.** No import,
+  no test, no doc, no Dockerfile line. It was added as "how a skill opts in", and a document
+  nobody loads is a document nobody notices going stale — which is exactly what happened: it
+  still carried the pre-ruling five-rung `window_stages` while all four live gated configs
+  carry seven. Corrected, and the ruling recorded in its `$comment`. If it is meant to be the
+  reference template, something should read it; if not, it should go.
+
+- **Learning** — **The buying-window gate admits every rung, by decision and not by defect.**
+  PO ruling 2026-09-01 (recorded in `aeo-backend/.temp/verify/propose-gated-generic.js:196`):
+  the fresh signal decides in-market, and a recently-decided account is still worth
+  surfacing. Measured at the time as 36 -> 63 qualified on MYgroup; re-measured independently
+  on 2026-09-09 as 63 of 69, which agrees. Anyone re-deriving this from the config alone will
+  read a gate that can never exclude and conclude "defect" — the ruling is the missing half,
+  and it lives in a gitignored scratch script.
+
+- **Learning** — **A consequence of that ruling nothing currently states:** `stage` appears in
+  `gated_score.py` only inside `in_buying_window`. It is binary admission and feeds no bonus
+  band, so ranking cannot distinguish an active deal from a decided one. On MYgroup's last run
+  AP Emissions Technologies ("7 - Too Late") re-scores to 92, above Kriya Therapeutics
+  ("4 - Active Pursuit") at 89. If the ruling meant *include* rather than *rank equally*, that
+  needs a stage term in the bonus. Open question for the PO. Owner: Joe.
+
+- **Learning** — MYgroup's stored runs ARE re-scorable and the question is now purely a
+  decision, not a feasibility problem. Both 2026-08-27 runs (69 scored rows) carry dated
+  `switching_signal` objects, every prospect is `NC` against the org's `["North Carolina"]`
+  with the alias map reconciling both spellings, `plan_rescore` returns a plan rather than
+  refusing, and the structurally-empty 46-79 band stays empty. 26 of the 69 currently sit
+  INSIDE 46-79, which is direct proof they are on the pre-gated scale. Cost is zero — no
+  grounded request. **Forward-only remains the standing ruling**; nothing was written.
+
+- **Learning** — `RescoreRefused`'s docstring cites "306 flooring prospects". Stored rows now
+  show `commercial-flooring-prospect-scanner` at 498 scored / 348 with `signals_found`;
+  neither is 306. Left alone deliberately — it is an illustrative figure in an exception
+  docstring, not a claim anyone builds on, and correcting it was outside what was asked.
+  Flagged so the next reader knows it is approximate. Owner: Joe.

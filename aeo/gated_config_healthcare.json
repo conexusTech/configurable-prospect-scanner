@@ -19,13 +19,15 @@
       }
     },
     "buying_window": {
-      "$comment": "In the market. The shared TIMELINE ladder's first five rungs. '6 - Likely Awarded' and '7 - Too Late' are excluded deliberately: both mean the decision has effectively been made, which is the opposite of an open window.",
+      "$comment": "In the market. EVERY rung of the shared TIMELINE ladder, terminal ones included — PO ruling 2026-09-01: the fresh signal decides in-market, and a recently-decided account is still worth surfacing. This file previously listed only rungs 1-5, which was the pre-ruling shape and disagreed with every live gated config; the widening was measured at 36 -> 63 qualified on MYgroup. Note the consequence, because nothing else states it: stage is a BINARY admission here and feeds no bonus band, so a '7 - Too Late' lead with a strong fresh signal outranks an active one with a weaker signal.",
       "window_stages": [
         "1 - Early Discovery",
         "2 - Relationship Building",
         "3 - Design Influence",
         "4 - Active Pursuit",
-        "5 - Decision Imminent"
+        "5 - Decision Imminent",
+        "6 - Likely Awarded",
+        "7 - Too Late"
       ],
       "gate_on": "any_fresh",
       "signal_freshness_months": 18
