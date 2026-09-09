@@ -67,12 +67,22 @@
   read a gate that can never exclude and conclude "defect" — the ruling is the missing half,
   and it lives in a gitignored scratch script.
 
-- **Learning** — **A consequence of that ruling nothing currently states:** `stage` appears in
-  `gated_score.py` only inside `in_buying_window`. It is binary admission and feeds no bonus
-  band, so ranking cannot distinguish an active deal from a decided one. On MYgroup's last run
-  AP Emissions Technologies ("7 - Too Late") re-scores to 92, above Kriya Therapeutics
-  ("4 - Active Pursuit") at 89. If the ruling meant *include* rather than *rank equally*, that
-  needs a stage term in the bonus. Open question for the PO. Owner: Joe.
+- **Learning** — **A consequence of that ruling nothing else states, and it is INTENDED.**
+  `stage` appears in `gated_score.py` only inside `in_buying_window`. It is binary admission
+  and feeds no bonus band, so ranking cannot distinguish an active deal from a decided one.
+  On MYgroup's last run AP Emissions Technologies ("7 - Too Late") re-scores to 92, above
+  Kriya Therapeutics ("4 - Active Pursuit") at 89.
+
+  ✅ **Raised with the PO on 2026-09-09 and declined: no stage term in the bonus.** So the
+  ruling means what it says — a fresh signal decides in-market, and rank follows signal
+  strength and recency rather than deal stage. **Closed, not open.** Recorded because
+  anyone re-deriving this from the code will read it as a defect and re-raise it, which is
+  precisely what happened on 2026-09-09 before the ruling was found; it lives in a
+  gitignored scratch script and nowhere a reader would look.
+
+  ⚠️ **The one thing that would reopen it** is evidence rather than opinion: a salesperson
+  working the list top-down and wasting time on decided accounts. That is an observation
+  nobody has made yet, and it is the only kind that should overturn a deliberate call.
 
 - **Learning** — MYgroup's stored runs ARE re-scorable and the question is now purely a
   decision, not a feasibility problem. Both 2026-08-27 runs (69 scored rows) carry dated
