@@ -121,18 +121,54 @@ def in_target_market(
     return True
 
 
+def is_future(raw: Any, today: date) -> bool:
+    """Whether a signal date lies after ``today``.
+
+    Compared as a ``(y, m, d)`` TUPLE rather than by building a `date`, because
+    `_parse_partial` admits a day up to 31 in any month — ``2026-02-31`` parses, and
+    ``date(2026, 2, 31)`` raises. Tuple ordering answers the only question asked here and
+    cannot throw on a date the parser already accepted.
+
+    An unparseable date is **not** future: it is unknown, and `fresh_signals` already
+    excludes it for having no age at all.
+    """
+    parsed = _parse_partial(raw)
+    if parsed is None:
+        return False
+    return parsed > (today.year, today.month, today.day)
+
+
 def fresh_signals(
     signals: Sequence[dict[str, Any]], months: int, today: date
 ) -> list[dict[str, Any]]:
-    """Signals strictly younger than ``months``.
+    """Signals strictly younger than ``months``, and **not dated in the future**.
 
     🔑 **Strictly ``<``, while the recency band awards on ``<=``.** Deliberate asymmetry:
     strict about ADMITTING a lead, generous about CREDITING one already admitted. Smart
     Wires sits exactly on the boundary at 18 whole months and is correctly gated out.
+
+    🔴 **A future date is refused here while `age_months` still clamps it to 0, and the
+    split is the point.** That clamp is defensible for CREDITING — a known upcoming event
+    is real evidence, which is what `band_recency` reads it for. It is not defensible for
+    ADMITTING: a signal dated after today either has not happened or is somebody's
+    projection, and letting it open the gate means the gate opens on an event nobody has
+    observed.
+
+    ⚠️ **Found in production, not in a test.** MYgroup's `Andrew Bateman` was rank 1 at
+    score 94 on a signal dated 2026-09-15 against a run of 2026-08-27 — nineteen days
+    ahead — with **no other fresh signal at all**, so the clamp was the only thing
+    admitting it. Six such signals existed across two books.
+
+    🔑 This restores the rule `_parse_partial` already states for imprecise dates: *the
+    only thing a date we cannot trust should do is CLOSE the gate, never open one.* The
+    future clamp was the one place in this module that broke it.
     """
     out = []
     for s in signals:
-        age = age_months(s.get("signal_date"), today)
+        raw = s.get("signal_date")
+        if is_future(raw, today):
+            continue
+        age = age_months(raw, today)
         if age is not None and age < months:
             out.append(s)
     return out

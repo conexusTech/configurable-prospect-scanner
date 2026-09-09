@@ -220,3 +220,39 @@
   database.** `localhost:5433` holds 14 orgs / 1,399 prospects; production and
   `localhost:5432` both hold 16 / 1,564. Anything reasoning about "the production copy" needs
   to say which port it means.
+
+- **Update** — 🔴 **The gate no longer opens on a signal dated in the future**, and both books
+  are re-scored and in production. `fresh_signals` now refuses a future date while
+  `age_months` still clamps it to 0 — the split is deliberate: a known upcoming event is fair
+  to CREDIT in `band_recency`, and unfair to ADMIT on, because it has not happened.
+  MYgroup 36 -> **35** qualified, Matrix Frame stays 20 (one lead moved Top -> Standard
+  Priority because the fresh pool no longer offers a future signal to select).
+
+- **Learning** — **Found in production, by looking at rank 1.** MYgroup's `Andrew Bateman`
+  was rank 1 at score 94 on a signal dated 2026-09-15 against a run of 2026-08-27 —
+  nineteen days ahead — with **no other fresh signal at all**, so the clamp was the only
+  thing admitting it. Six such signals existed across the two books. Rank 1 is now
+  `David Grigg`, admitted on real past evidence. 🔑 **`gated_score.py` already stated the
+  rule this broke:** `_parse_partial` resolves an imprecise date to its earliest instant so
+  that *"the only thing an imprecise date can do is CLOSE the gate, never open one."* The
+  future clamp was the one place in the module that violated its own principle — worth
+  remembering as a search pattern, because a module that states a rule is a module that can
+  be checked against it.
+
+- **Learning** — **Two of my own verification queries were wrong before the third was right,
+  and each was wrong in the direction of alarm.** The first counted the 46-79 forbidden band
+  across the WHOLE prospects table and returned 102 — all of them legacy-scored rows on four
+  non-gated skills, where 46-79 is a legitimate score. The second looked for admitted leads
+  with no usable signal and returned 1: `Apiture`, whose dates are `2025-10` and `2026-01` —
+  **partial dates**, which the engine parses and my `^\d{4}-\d{2}-\d{2}$` regex rejected.
+  ⚠️ **A check written against a narrower grammar than the code accepts reports defects that
+  do not exist**, and it is the same class of error as a check too broad to fail. Both were
+  caught by reading the offending row rather than by trusting the count.
+
+- **Learning** — The eight new tests were **proven to fail against the unfixed engine**
+  before being trusted, and the four that failed are named: the admission test, the
+  `fresh_signals` filter, the partial-future case, and `selected_from_fresh`. The four that
+  passed either way are the controls — a past date still admits, a future date beside a
+  fresh one still admits, an unparseable date is unknown rather than future, and
+  `age_months` still clamps. **A test class where every test fails without the fix has no
+  control in it**, and would pass just as well if the gate closed on everyone.

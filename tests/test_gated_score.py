@@ -13,7 +13,14 @@ from datetime import date
 import pytest
 
 import av_lead_scanner as als
-from aeo.gated_score import FORBIDDEN_BAND, age_months, score, select_signal
+from aeo.gated_score import (
+    FORBIDDEN_BAND,
+    age_months,
+    fresh_signals,
+    is_future,
+    score,
+    select_signal,
+)
 
 TODAY = date(2026, 8, 27)
 
@@ -168,6 +175,70 @@ class TestBoundaryAsymmetry:
         # one. `2026` is 2026-01-01, not mid-year.
         assert age_months("2026", TODAY) == age_months("2026-01-01", TODAY) == 7
         assert age_months("2026-08", TODAY) == age_months("2026-08-01", TODAY) == 0
+
+
+class TestAFutureDateCannotOpenTheGate:
+    """A signal dated after the run must not admit a lead.
+
+    🔴 **Found in production on 2026-09-09, not by any of these tests.** MYgroup's
+    `Andrew Bateman` was rank 1 at score 94 on a signal dated 2026-09-15 against a run
+    of 2026-08-27, with **no other fresh signal** — so `age_months`' future-clamp was
+    the only thing admitting it. Six such signals existed across two books.
+
+    ⚠️ The clamp itself is KEPT, and `TestBoundaryAsymmetry` still pins it. The split is
+    the fix: a known upcoming event is fair to CREDIT in `band_recency`, and unfair to
+    ADMIT on, because the event has not happened.
+    """
+
+    FUTURE = [{"signal_type": "rfp activity", "signal_class": "rfp_active",
+               "signal_date": "2026-09-15"}]
+
+    def test_a_lead_whose_only_signal_is_future_is_not_admitted(self):
+        out = run(NC, self.FUTURE, "4 - Active Pursuit")
+        assert out["gates"]["buying_window"] is False
+        assert out["lane"] == "target_market_only"
+        assert out["total"] < CFG["floor"]
+
+    def test_the_same_lead_IS_admitted_once_the_date_is_in_the_past(self):
+        """The control. Without it this class would also pass if the gate closed for
+        everyone, which is the way a fix like this goes wrong."""
+        past = [dict(self.FUTURE[0], signal_date="2026-08-15")]
+        out = run(NC, past, "4 - Active Pursuit")
+        assert out["gates"]["buying_window"] is True
+        assert out["total"] >= CFG["floor"]
+
+    def test_a_future_signal_beside_a_fresh_one_still_admits(self):
+        """The fix must not over-reject: one unusable signal does not disqualify a lead
+        that carries real evidence too."""
+        out = run(NC, [*self.FUTURE, *FRESH_RFP], "4 - Active Pursuit")
+        assert out["gates"]["buying_window"] is True
+        assert out["total"] >= CFG["floor"]
+
+    def test_fresh_signals_drops_the_future_one_and_keeps_the_past_one(self):
+        kept = fresh_signals([*self.FUTURE, *FRESH_RFP], 18, TODAY)
+        assert [s["signal_date"] for s in kept] == ["2026-08-01"]
+
+    def test_a_future_PARTIAL_date_is_also_refused(self):
+        """`2027` resolves to 2027-01-01, still after today. An imprecise future date
+        must close the gate for the same reason a precise one does."""
+        assert is_future("2027", TODAY) is True
+        assert fresh_signals([dict(self.FUTURE[0], signal_date="2027")], 18, TODAY) == []
+
+    def test_an_unparseable_date_is_unknown_rather_than_future(self):
+        assert is_future("not-a-date", TODAY) is False
+        assert is_future(None, TODAY) is False
+
+    def test_the_recency_band_still_credits_a_future_date_deliberately(self):
+        """Pins the SPLIT, not just the fix. If someone later 'tidies' this by making
+        `age_months` refuse a future date, this test fails and names the reason."""
+        assert age_months("2026-12-01", TODAY) == 0
+
+    def test_selected_from_fresh_is_False_when_only_a_future_signal_exists(self):
+        out = run(NC, self.FUTURE, "4 - Active Pursuit")
+        assert out["selected_from_fresh"] is False
+        assert out["selected_signal"] is not None, (
+            "a gated-out lead should still describe its best evidence"
+        )
 
 
 class TestBands:
