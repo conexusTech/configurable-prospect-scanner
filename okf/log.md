@@ -90,7 +90,13 @@
   with the alias map reconciling both spellings, `plan_rescore` returns a plan rather than
   refusing, and the structurally-empty 46-79 band stays empty. 26 of the 69 currently sit
   INSIDE 46-79, which is direct proof they are on the pre-gated scale. Cost is zero — no
-  grounded request. **Forward-only remains the standing ruling**; nothing was written.
+  grounded request.
+
+  ⚠️ **This entry ended "forward-only remains the standing ruling; nothing was written" when
+  it was first appended, hours before that stopped being true.** Corrected rather than left
+  standing, for the same reason the `rescore.py` banner was: an entry stating the old ruling
+  gets read as the current one. Reversed later the same day, and the rescore is now in
+  production.
 
 - **Learning** — `RescoreRefused`'s docstring cites "306 flooring prospects". Stored rows now
   show `commercial-flooring-prospect-scanner` at 498 scored / 348 with `signals_found`;
@@ -98,8 +104,9 @@
   docstring, not a claim anyone builds on, and correcting it was outside what was asked.
   Flagged so the next reader knows it is approximate. Owner: Joe.
 
-- **Update** — MYgroup's two 2026-08-27 runs rescored onto the gated model, 69 rows,
-  local database only. Concepts read: [/lib/scoring.md](/lib/scoring.md),
+- **Update** — MYgroup's two 2026-08-27 runs rescored onto the gated model, 69 rows.
+  **Local first, then production the same day** — this line read "local database only" until
+  the production sync landed. Concepts read: [/lib/scoring.md](/lib/scoring.md),
   [/playbooks/offline-evaluation.md](/playbooks/offline-evaluation.md). No engine file
   changed; the writer lives outside this repo in `aeo-backend/.temp/verify/`.
 
@@ -153,3 +160,37 @@
   (`80-100 / 46-79 / 0-45`) nor the legacy stored labels. Not corrected: the session that
   found it was scoped to the `window_stages` claim in the same file. Same orphaned-document
   problem as that one. Owner: Joe.
+
+- **Update** — The MYgroup rescore is **in production** as of 2026-09-09, applied and verified
+  locally first. 69 rows, four columns (`score`, `priority_band`, `rank`, `score_factors`),
+  no stage written and no row deleted. Verified in production after the write: bands
+  consistent with scores (63 `Hot - Ready Now` at 86-94, 6 `Cold - Monitor` at 27-35), 0 in
+  the forbidden band, 0 legacy labels, 69/69 carrying `gated.bands`, ranks total and
+  contiguous per run, and the 90 never-scored rows untouched.
+
+- **Learning** — 🔴 **`kguser` is not a reliable name for production, and the rescore writer
+  believes it is.** `aeo-backend/.temp/verify/apply-rescore.js:75` decides production with
+  `current_user === 'kguser'`. The local Docker container `aeo-pg-prodcopy` on
+  `127.0.0.1:5433` runs as `kguser`/`kgdb` — measured, not assumed. So a run against that
+  container prints `*** PRODUCTION ***`, demands `--production`, accepts it, and reports the
+  rows committed while production is untouched; the inverse guard ("`--production` against a
+  non-production database → refuse") cannot fire either, because the container looks like
+  production. **One fact defeats both halves**, and it fails toward confidence rather than
+  toward caution — the direction that costs the most. The production sync therefore used a
+  separate script taking its connection from the running production Deployment's own
+  Kubernetes Secret: identity by **provenance**, which a stale env file cannot redirect.
+  Roadmap row `fix-prod-detection-in-rescore-writer`, and its acceptance criterion is the
+  **refusal being demonstrated**, not the rule being written. Owner: Joe.
+
+- **Learning** — **Bringing a verified local result to production is a delta, never a
+  replace.** Production held 5 `read` flags on these rows and its own stage history; the
+  local copy could not have either. Replacing the two runs wholesale would have destroyed
+  that silently while looking like a faithful copy. Two integrity checks made the delta safe
+  and both are cheap enough to repeat: every target row still held its **pre**-re-score
+  value (so the local result genuinely described production), and local's `score_factors`
+  was proven a **superset** of production's (so replacing that column loses nothing).
+
+- **Learning** — **The `.temp/verify` prodcopy container is an OLDER copy than the working
+  database.** `localhost:5433` holds 14 orgs / 1,399 prospects; production and
+  `localhost:5432` both hold 16 / 1,564. Anything reasoning about "the production copy" needs
+  to say which port it means.
