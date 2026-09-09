@@ -87,3 +87,46 @@
   neither is 306. Left alone deliberately — it is an illustrative figure in an exception
   docstring, not a claim anyone builds on, and correcting it was outside what was asked.
   Flagged so the next reader knows it is approximate. Owner: Joe.
+
+- **Update** — MYgroup's two 2026-08-27 runs rescored onto the gated model, 69 rows,
+  local database only. Concepts read: [/lib/scoring.md](/lib/scoring.md),
+  [/playbooks/offline-evaluation.md](/playbooks/offline-evaluation.md). No engine file
+  changed; the writer lives outside this repo in `aeo-backend/.temp/verify/`.
+
+- **Learning** — 🔴 **`aeo/rescore.py`'s `NOT APPROVED` banner is now stale.** The PO
+  reversed forward-only on 2026-09-09 and the rescore has been applied. The banner still
+  cites 2026-08-31's *"we do not need to rescore anything"* and warns — correctly, and
+  about itself — that a file asserting its own authorisation is the drift nobody re-reads
+  for. It is now wrong in the opposite direction. Left in place rather than edited in this
+  read-only-to-the-engine session; it needs the reversal written into it. Owner: Joe.
+
+- **Learning** — **Re-judging buys no score change under the current gate, so never pay
+  for it as part of a rescore.** `pipeline_status` appears in `gated_score.py` only inside
+  `in_buying_window`; the PO's 2026-09-01 ruling put every rung in the window, and no bonus
+  band reads stage. So stage is binary admission that admits everything. The paid
+  `rejudge_and_score.py` path would have cost real money and moved not one score.
+
+- **Learning** — **Three defects in `apply-rescore.js`, all found before it ran, all in the
+  same class: the writer and the engine disagreeing about a shape.** (1) It reads
+  `stage_after` per row — produced only by the paid re-judge — with no guard, so a
+  rescore-only input writes `undefined`, which pg stores as NULL, **wiping
+  `pipeline_status` on every row**. (2) It set `score_factors.gated` to the boolean `true`
+  where the engine stores the full breakdown object; that makes a rescored row structurally
+  unlike an engine-scored one, and breaks `_rank_key`, which does `factors.get("gated") or
+  {}` then `.get("bands")` — a bool has no `.get`. (3) It backed up neither `priority_band`
+  nor `rank` while the fixed version writes both. Four refusal guards were added and each
+  **proven to fire** against a deliberately broken input, with an untouched control still
+  accepted — the guards are worth nothing until they have been seen to refuse.
+
+- **Learning** — **`priority_band` and `rank` are computed by calling this repo's own
+  `av_lead_scanner.priority_band()` and `_rank_key()`, never reimplemented downstream.**
+  `_rank_key` is a five-key tie-break cascade that exists because a single-key sort let
+  tied prospects reorder between runs of the same data — measured on run `741b7b3b` as 4
+  ties covering 8 of 24 prospects. A JS port of a determinism guarantee is a second
+  implementation of the exact thing it guarantees.
+
+- **Learning** — `aeo/gated_config_healthcare.json`'s `$comment_bands` describes a **third**
+  band table — `Hot 75-100 / Warm 50-74 / Cold 0-49` — which is neither the live config's
+  (`80-100 / 46-79 / 0-45`) nor the legacy stored labels. Not corrected: the session that
+  found it was scoped to the `window_stages` claim in the same file. Same orphaned-document
+  problem as that one. Owner: Joe.
