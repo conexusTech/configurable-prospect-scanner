@@ -304,3 +304,40 @@
   which is the property neither half pins alone. **6 of 9 now fail without the fix, and the
   three genuine controls are named.** A control that duplicates an existing test inflates
   the appearance of rigour without adding any.
+
+- **Update** — **Image `db5ae97` built, pushed and registered in the production queue
+  catalog.** `aeo-configurable-prospect-scanner@sha256:eef44849…`, linux/amd64, 58 MB. It
+  carries the future-date gate fix. **Proven by running the pushed image** rather than by
+  trusting the build — `is_future` present, a future-dated signal refused, a past one kept.
+  The catalog entry moved from `d6b661a6bbe3` (tag `c748174`, 2026-09-01), and every other
+  field was diffed after the write: only `image` and `updatedAt` changed.
+
+- **Learning** — ⚠️ **This repo's CI builds no image**, so a catalog update is never just a
+  catalog update: `gate.yml` runs the gate and nothing else. The newest image before today
+  was `c748174` from 2026-09-01, so three commits of engine changes existed with no image
+  anywhere. **A request to "point the catalog at the updated one" has a build-and-push step
+  hidden inside it.** Tag convention is the short commit sha; match `linux/amd64` (the
+  outgoing image's architecture — a mismatch fails inside the k8s Job, not at build).
+
+- **Learning** — 🔴 **A partial `PUT` to the queue catalog silently nulls load-bearing
+  fields.** `upsert` merges, then explicitly forces `command`, `envFrom`, `namespace`,
+  `payloadFields` and `serviceAccountName` to `null` when absent from the payload — so a
+  `{image}`-only write would have nulled `envFrom: ["secret/scanner-secrets"]` and **every
+  scan run would have lost its secrets**. The safe shape is to GET the entry, change the one
+  field, PUT the whole thing back, then diff every field. 🔑 **Same defect class as the
+  broken restore found earlier the same day** — a writer that nulls whatever the caller did
+  not mention — and the reason a 200 response is not evidence.
+
+- **Learning** — **The catalog pins by DIGEST, not tag**, so re-tagging cannot silently
+  change what runs, and a catalog update requires a pushed image first. ⚠️ **And one image
+  and one catalog entry serve EVERY builder-created skill** (decision C-1) — so this image
+  change re-engined all five gated skills and every legacy one at once, not just the two
+  books that prompted it. The change is correct for all of them: the legacy additive path
+  never calls `fresh_signals` and deliberately treats a future date as current
+  (`av_lead_scanner.py:1889`). **Price an image change as five skills, not as one.**
+
+- **Learning** — The queue's catalog routes **403 at nginx from the public ingress**; reach
+  them in-cluster via `port-forward svc/queue -n production`. The route is `catalog/entries`
+  under a global `/api` prefix — not `catalog` — and auth is Basic as `admin` with the
+  `queue` Secret's `ADMIN_BASIC_AUTH_PASSWORD`. Recorded because three of my four first
+  attempts failed on the path and the ingress rather than on anything real.
