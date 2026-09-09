@@ -93,12 +93,25 @@
   [/playbooks/offline-evaluation.md](/playbooks/offline-evaluation.md). No engine file
   changed; the writer lives outside this repo in `aeo-backend/.temp/verify/`.
 
-- **Learning** — 🔴 **`aeo/rescore.py`'s `NOT APPROVED` banner is now stale.** The PO
-  reversed forward-only on 2026-09-09 and the rescore has been applied. The banner still
-  cites 2026-08-31's *"we do not need to rescore anything"* and warns — correctly, and
-  about itself — that a file asserting its own authorisation is the drift nobody re-reads
-  for. It is now wrong in the opposite direction. Left in place rather than edited in this
-  read-only-to-the-engine session; it needs the reversal written into it. Owner: Joe.
+- **Update** — 🔴 **`aeo/rescore.py`'s `NOT APPROVED` banner was stale and is now
+  corrected.** The PO reversed forward-only on 2026-09-09; the banner still cited
+  2026-08-31's *"we do not need to rescore anything"*, so it had become wrong in the
+  opposite direction — worse than wrong in the original one, because a reader would have
+  refused work the PO asked for and cited this file doing it. Docstring only, proven by an
+  AST comparison that was itself shown to fail on a one-constant edit before being
+  trusted; no engine file in the diff.
+
+  ⚠️ **This entry replaces one written earlier the same day** which said the banner was
+  "left in place … Owner: Joe". That was true for about an hour and would have sent the
+  next reader looking for finished work. Rewritten rather than appended-to because the log
+  is read top-down for current state, and two entries on one date disagreeing about
+  whether a thing is done is the same defect the roadmap has now made three times.
+
+  The banner's own warning — a file claiming its own authorisation is the drift nobody
+  re-reads for — has now been demonstrated in **both** directions by that one docblock: it
+  once asserted a reversal that had not happened, and then denied one that had. Both
+  instances are kept visible in the file, and it now points at the roadmap row and this log
+  rather than asserting anything itself.
 
 - **Learning** — **Re-judging buys no score change under the current gate, so never pay
   for it as part of a rescore.** `pipeline_status` appears in `gated_score.py` only inside
