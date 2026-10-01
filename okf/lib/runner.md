@@ -37,6 +37,8 @@ more than half the scored leads have no state, or not one lead passed the gate. 
 fails every lead closed while the run reports normally, so the log line is the only place it
 shows. Non-gated runs never warn.
 
+When a gated skill's allowed states are bound to the org's `home_markets`, the runner adds the US states those markets name (and the secondary markets' when the org's scope includes them) beside the original entries, and logs the entries that name no state in one `WARNING target-market gate:` line — see [target-market-states](/capabilities/target-market-states.md).
+
 ## Phase selection
 
 A run may be given a subset of phases in its task payload rather than the full sequence,

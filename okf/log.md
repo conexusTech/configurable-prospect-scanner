@@ -2,6 +2,24 @@
 
 ## 2026-10-01
 
+- **Update** — `resolve-market-bindings-to-states` (roadmap row `org-markets-resolve-to-states`;
+  decided by Leo on best judgement). A gated skill whose `allowed_states` is the
+  `{"context_ref":"home_markets"}` binding now admits the US states its org's free-text markets
+  actually name — state names and codes, "City, ST", "City, State" — plus the secondary markets'
+  states when `include_scope` is exactly `HOME_SECONDARY` (the test zip discovery uses, so gate and
+  search agree). Nothing is guessed: regions, bare cities and countries add no state and are logged
+  once. Original entries are kept, so alias matching is unchanged, and markets in any shape other
+  than a list are left exactly as before. **Re-scoring every stored gated lead of the two bound skills
+  (MYgroup 69, Matrix Frame 149) gives 0 verdict changes**, and Matrix Frame's run now names the four
+  entries that place nothing. `scripts/rejudge_and_score.py` applies the same resolution, so offline
+  and runner scoring agree. Capability `target-market-states`.
+
+- **Learning** — **A real-data zero-diff proof only covers the shapes the data holds.** Both bound orgs
+  store markets as a list, so the proof could not see that a dict-shaped `home_markets` — a shape
+  `zip_discovery` still accepts — went from passing every lead to failing every one. Two reviewers
+  found it independently. Prove "no regression" over the inputs the code accepts, not only the ones
+  in today's database.
+
 - **Update** — `send-verified-location-with-scored-leads` landed. A kept lead is relocated to the
   address the geography step verified — normalised to one of the 51 US codes (`aeo/us_states.py`,
   identical to `aeo-backend`'s list) — on the record AND on `_internal`, so it is scored where it is

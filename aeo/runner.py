@@ -58,6 +58,7 @@ from aeo.config_mapping import (  # noqa: E402
 )
 from aeo.context_refs import UnresolvedRefError  # noqa: E402
 from aeo.context_refs import resolve as _resolve_refs  # noqa: E402
+from aeo.market_states import apply_market_binding  # noqa: E402
 from aeo.bootstrap import BootstrapError, bootstrap  # noqa: E402
 from aeo.event_mapping import map_event  # noqa: E402
 from aeo.modules.apply import apply_modules, merge_signals_into_scored  # noqa: E402
@@ -99,6 +100,40 @@ def resolve_context_refs(aeo_context: dict[str, Any]) -> dict[str, Any]:
     config = (aeo_context.get("skill") or {}).get("config") or {}
     resolved = _resolve_refs(config, aeo_context)
     return {**aeo_context, "skill": {**(aeo_context.get("skill") or {}), "config": resolved}}
+
+
+_MAX_UNRESOLVED_LOGGED = 10
+
+
+def apply_market_resolution(
+    raw_context: dict[str, Any], resolved_context: dict[str, Any]
+) -> dict[str, Any]:
+    """Let a gated skill bound to the org's markets admit the states those markets name.
+
+    `raw_context` is the context BEFORE `resolve_context_refs` (the binding is only visible
+    there); `resolved_context` is what that returned. Logs the market entries that name no state
+    once. **Never raises**: a malformed geography can only skip the resolution, never fail the
+    run -- the gate then behaves exactly as it did before this existed.
+    """
+    try:
+        raw_config = (raw_context.get("skill") or {}).get("config") or {}
+        resolved_config = (resolved_context.get("skill") or {}).get("config") or {}
+        unresolved = apply_market_binding(
+            raw_config, resolved_config, resolved_context.get("geography")
+        )
+    except Exception as exc:  # noqa: BLE001 - a market list must never fail a run
+        _log(f"WARNING target-market gate: markets were not resolved to states ({exc!r})")
+        return resolved_context
+    if unresolved:
+        # Capped: the entries are org free text, and a long list must not flood the log.
+        shown = "; ".join(repr(e) for e in unresolved[:_MAX_UNRESOLVED_LOGGED])
+        more = len(unresolved) - _MAX_UNRESOLVED_LOGGED
+        _log(
+            "WARNING target-market gate: these market entries name no US state and add none: "
+            + shown
+            + (f" (+{more} more)" if more > 0 else "")
+        )
+    return resolved_context
 
 
 def _auth_headers() -> dict[str, str]:
@@ -720,7 +755,10 @@ def main() -> int:
     # dict where a list belongs, so the phase searches for nothing and reports
     # success. This is the step that makes one skill serve many orgs.
     try:
+        raw_context = aeo_context
         aeo_context = resolve_context_refs(aeo_context)
+        # The binding is only visible in the RAW config, so this reads both.
+        aeo_context = apply_market_resolution(raw_context, aeo_context)
     except UnresolvedRefError as exc:
         sink.emit_safe({"type": "error", "message": str(exc)})
         _log(str(exc))

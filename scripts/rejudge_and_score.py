@@ -58,6 +58,7 @@ import av_lead_scanner as als  # noqa: E402
 from aeo.config_mapping import build_tool_context  # noqa: E402
 from aeo.context_refs import UnresolvedRefError  # noqa: E402
 from aeo.context_refs import resolve as resolve_refs  # noqa: E402
+from aeo.market_states import apply_market_binding  # noqa: E402
 from aeo.gated_score import score as gated_score  # noqa: E402
 from aeo.phases.ai_judgment import judge_prospects  # noqa: E402
 from aeo.signal_class import classify  # noqa: E402
@@ -192,6 +193,9 @@ def main() -> int:
     except UnresolvedRefError as exc:
         print(f"UNRESOLVED BINDING: {exc}\nThe scanner would fail the same way.")
         return 2
+    # The runner widens a home-markets binding to the states those markets name; do the same so
+    # offline and runner scoring use one allowed list.
+    apply_market_binding(raw_config, config, ctx.get("geography"))
 
     scoring = config.get("scoring") or {}
     if str(scoring.get("model") or "").lower() != "gated":
