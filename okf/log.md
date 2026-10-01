@@ -2,6 +2,20 @@
 
 ## 2026-10-01
 
+- **Update** — **Shipped to production 2026-10-01**: image `b5bbca0` (`sha256:8a19633c…`,
+  linux/amd64) pinned in the `conqrse-queue` catalog entry `configurable-prospect-scanner`, after the
+  gateway (`aeo-backend` `fca4d0e`) was confirmed running — its compiled service carries
+  `VERIFIED_LOCATION_VALID_SQL`. Read-modify-write: only `image` changed (`envFrom`,
+  `retry.attempts: 0`, `timeoutSec: 10800`, resources preserved), verified by API re-read and by the
+  queue database. Outgoing digest for rollback: `sha256:eef44849…` (`db5ae97`). Ships `bc30df2`,
+  `b78aca6` and `b5bbca0` to every builder-created skill at once.
+
+- **Learning** — 🔴 **Correction: an undeclared field on the scan callback is IGNORED, not a 400.**
+  This bundle and that day's commit messages said a scanner sending fields the gateway does not
+  declare would 400 every scored callback under `forbidNonWhitelisted`. The route binds a raw object
+  and calls `validate(instance)` with no options, so the global pipe never runs and extra keys are
+  dropped. The deploy order still matters, for a quieter reason: score and stored location disagree.
+
 - **Update** — `resolve-market-bindings-to-states` (roadmap row `org-markets-resolve-to-states`;
   decided by Leo on best judgement). A gated skill whose `allowed_states` is the
   `{"context_ref":"home_markets"}` binding now admits the US states its org's free-text markets

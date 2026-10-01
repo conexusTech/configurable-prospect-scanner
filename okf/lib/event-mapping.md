@@ -36,12 +36,14 @@ side-channel becomes an undocumented second schema.
 always has a city and state — discovery's raw values — and those are deliberately not on the
 fixed list. A lead the geography step verified AND relocated (its verified location was itself in the scan area) sends its normalised city, state and ZIP
 (state one of the 51 US codes the gateway accepts); any other lead sends none, and the
-internal marker itself is never sent, because the gateway rejects unknown fields.
+internal marker itself is never sent — it is not part of the scored contract.
 
-⚠️ **Deploy precondition: this scanner must not ship before the gateway carries `aeo-backend`
-`fca4d0e`.** Until then the gateway does not declare the three location fields, and because it
-rejects undeclared fields, a verified lead's city, state and ZIP would 400 **every** scored
-callback of the run, not just that lead's.
+⚠️ **Deploy order: the gateway (`aeo-backend` `fca4d0e`) before this scanner.** Not because the
+scanner would be rejected — corrected 2026-10-01: `POST /runtime/scans/:id/events` binds a raw
+object and calls `validate(instance)` with no options (`runtime-scan-events.controller.ts`), so an
+undeclared field is **ignored**, not a 400. The risk is quieter: an older gateway drops the
+location while this scanner has already **scored** the lead on it, so that run stores a score and
+a location that disagree, and nothing ever re-sends it. Both shipped 2026-10-01 in that order.
 
 Prospect and scored events pass a fixed field list through rather than forwarding whatever
 the engine produced, so an engine change cannot silently widen what this scanner sends.
