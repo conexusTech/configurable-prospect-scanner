@@ -2,6 +2,27 @@
 
 ## 2026-10-01
 
+- **Update** — `send-verified-location-with-scored-leads` landed. A kept lead is relocated to the
+  address the geography step verified — normalised to one of the 51 US codes (`aeo/us_states.py`,
+  identical to `aeo-backend`'s list) — on the record AND on `_internal`, so it is scored where it is
+  stored, and only verified-and-relocated leads send `city`/`state`/`zip_code` on the scored
+  callback. Fixes Wheelhouse-shaped (`headquarters_location`) and Arthur Elliott (`headquarters`)
+  skills on their next run; legacy region scoring follows the verified location too. A
+  `WARNING target-market gate:` log line names a gated run whose gate cannot be evaluated.
+  **Deploy order: `aeo-backend` `fca4d0e` first**, or every scored callback 400s. Capability
+  `verified-location` and its QA checklist.
+
+- **Learning** — 🔴 **A keep/reject verdict and the location applied to the kept lead must come from
+  the same evidence.** The first cut classified verified-plus-discovery-fallback values but wrote
+  verified-only ones, so a lead kept on discovery's in-area ZIP could be relocated out of area (an
+  Austin scan storing a Dallas lead). Reviewer-reproduced, then fixed by relocating only when the
+  written location itself classifies `IN_AREA`; a 30,000-input fuzz of old against new code showed 0
+  differences in which leads geography keeps.
+
+- **Learning** — Python's `\d` matches non-ASCII digits; Postgres's `[0-9]` does not. A fullwidth
+  ZIP passed the scanner's check and would have been ignored by the gateway, splitting the score
+  from the stored location. Use `[0-9]` (or `re.ASCII`) whenever a value crosses into SQL.
+
 - **Update** — `store-score-explanations` landed. Score explanations now reach the gateway:
   `explain_scores` filed results under `id` while the engine's scored items carry only
   `prospect_id`, so every paragraph on every gated run was generated, billed and dropped

@@ -8,11 +8,14 @@ evidence and re-run until satisfied or exhausted.
 
 ## Three constraints from the surrounding system, none of them negotiable
 
-1. **A prospect's stored address can never be corrected.** AEO writes prospects
-   `ON CONFLICT ("id") DO NOTHING`, and the engine emits them *during* discovery —
-   before verification can run. So the first write wins permanently. Verification
-   therefore decides **keep or reject**, and records the address it actually found in
-   the rejection's `validation_data`, rather than pretending it can fix the column.
+1. **A prospect's stored address can never be corrected by the prospects write.** AEO
+   writes prospects `ON CONFLICT ("id") DO NOTHING`, and the engine emits them *during*
+   discovery — before verification can run. So the first write wins permanently.
+   Verification therefore decides **keep or reject**, and records the address it actually
+   found in the rejection's `validation_data`, rather than pretending it can fix the column.
+   For a KEPT lead the verified address now travels on the *scored* callback instead
+   (`aeo-backend` `fca4d0e`): `_apply_verified` sets it on the lead, and the runner carries
+   it onto the scored item.
 2. **Re-discovery must exclude what we have already seen**, or every round returns
    the same firms. The engine already has the mechanism: `seed_firms` renders as
    *"do NOT return these; find ADDITIONAL firms"*. Each round appends the names seen
@@ -53,6 +56,7 @@ from aeo.phases.geo_filter import (
     TargetArea,
     classify_prospect,
 )
+from aeo.us_states import normalize_city, normalize_state, normalize_zip
 
 #: Rounds of discovery. 2 by default: one search, one corrective re-search. A third
 #: round rarely finds what two did not, and each one costs a full discovery sweep.
@@ -157,16 +161,84 @@ def needs_verification(
 
 
 def _merge_verified(prospect: dict[str, Any], verified: dict[str, Any]) -> dict[str, Any]:
-    """A copy of the prospect carrying the verified location, for re-classification.
+    """A copy of the prospect carrying the verified location, for the keep/reject verdict.
 
-    Deliberately does NOT mutate the original: the stored row keeps whatever discovery
-    reported, because AEO will not overwrite it anyway.
+    Deliberately does NOT mutate the original. ⚠️ What the verdict sees is the verified
+    values layered OVER discovery's: any part the verifier left empty falls back to what
+    discovery reported (its ZIP, typically). So a lead can be kept on discovery's in-area
+    ZIP although the verified city is elsewhere -- which is why `_apply_verified` does not
+    trust this copy and classifies the verified location on its own.
     """
     merged = dict(prospect)
     for key in ("city", "state", "zip_code"):
         if verified.get(key):
             merged[key] = verified[key]
     return merged
+
+
+def _place(value: Any) -> str | None:
+    """A city or state for comparison: trimmed, case-folded, blank as None."""
+    return " ".join(str(value or "").split()).lower() or None
+
+
+def _apply_verified(
+    prospect: dict[str, Any],
+    evidence: dict[str, Any],
+    area: TargetArea,
+    *,
+    strictness: str = STRICTNESS_METRO,
+) -> bool:
+    """Make a KEPT lead's location the verified one. True when it was relocated.
+
+    Relocates only when (a) the verified state normalises to one of the 51 US codes the
+    gateway accepts and (b) the location this writes -- by itself, with no fallback to
+    discovery's values -- classifies IN_AREA under the same area and strictness. Otherwise
+    discovery's location stands and nothing is marked, so "verified" keeps meaning
+    something on the wire. (b) closes a hole: the keep/reject verdict sees the verified
+    values layered over discovery's, so a lead kept on discovery's in-area ZIP could be
+    stored as a verified city that is outside the area.
+
+    City and ZIP are normalised too, and an unusable one becomes absent rather than being
+    kept from discovery -- a Charlotte state beside an Austin city would be a location
+    nobody reported. When the place changes (city or state, case/whitespace-insensitive,
+    as the gateway compares them) the street address is cleared: it belonged to the old
+    place. Same place keeps its street.
+
+    ⚠️ Written to `_internal` as well as the record: the scorer reads `_internal`, so
+    setting the record alone would store one location and score on another. `_internal`
+    takes `""` for an absent part (its own empty form -- `_parse_locality` never writes a
+    None there and region scoring does `str(lead.get("city"))`), the record takes `None`.
+    """
+    state = normalize_state(evidence.get("state"))
+    if state is None:
+        return False
+    location = {
+        "city": normalize_city(evidence.get("city")),
+        "state": state,
+        "zip_code": normalize_zip(evidence.get("zip_code")),
+    }
+    # A bare state is not a location: the gateway would null the city and ZIP, and the street
+    # below would be wiped for nothing. Same rule as `verify_locations`, but applied AFTER
+    # normalising -- a NUL-laden city or a fullwidth ZIP is truthy raw and empty here.
+    if location["city"] is None and location["zip_code"] is None:
+        return False
+    if classify_prospect(location, area, strictness=strictness) != IN_AREA:
+        return False
+
+    moved = _place(prospect.get("city")) != _place(location["city"]) or _place(
+        prospect.get("state")
+    ) != _place(location["state"])
+    internal = prospect.get("_internal")
+    for key, value in location.items():
+        prospect[key] = value
+        if isinstance(internal, dict):
+            internal[key] = value or ""
+    if moved:
+        prospect["address"] = None
+        if isinstance(internal, dict):
+            internal["location_address"] = ""
+    prospect["verified_location"] = dict(location)
+    return True
 
 
 def _with_exclusions(
@@ -253,6 +325,8 @@ def discover_in_area(
             else {}
         )
 
+        relocated = 0
+        moved_state = 0
         for prospect in unconfirmed:
             evidence = verified.get(prospect["id"])
             if evidence is None:
@@ -288,11 +362,21 @@ def discover_in_area(
                     }
                 )
             else:
+                # Normalised, so "Tex." / "texas" vs "TX" is not a move; a discovery state
+                # that is not a US state at all counts as none.
+                had_state = normalize_state(prospect.get("state"))
+                if _apply_verified(prospect, evidence, area, strictness=strictness):
+                    relocated += 1
+                    # A different STATE than discovery had is the case worth reading in
+                    # the log: it is the one that changes which gates a lead passes.
+                    if had_state and had_state != prospect["state"]:
+                        moved_state += 1
                 in_area.append(prospect)
 
         log(
             f"round {round_no}: {len(fresh)} new, {len(unconfirmed)} verified, "
-            f"{len(in_area)}/{target_count} in area"
+            f"{len(in_area)}/{target_count} in area, "
+            f"{relocated} relocated ({moved_state} to a different state)"
         )
         if len(in_area) >= target_count:
             break

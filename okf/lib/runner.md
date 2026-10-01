@@ -25,6 +25,18 @@ Where the config leaves a gap that the organization can answer — its markets, 
 cycle — the org's own values fill it. A hardcoded default here would be a wrong answer
 that looks like a configured one.
 
+## Where a lead is located
+
+Right after scoring, the runner carries each kept lead's **verified location** (the address
+the geography step established — see [jobs/phases](/jobs/phases.md)) onto its scored item, and
+logs how many it carried. Only leads that were verified AND relocated get one; the rest send no location at all.
+
+A gated run whose target-market gate cannot be evaluated logs one
+`WARNING target-market gate:` line naming the run: no gate configured (no allowed states),
+more than half the scored leads have no state, or not one lead passed the gate. Such a gate
+fails every lead closed while the run reports normally, so the log line is the only place it
+shows. Non-gated runs never warn.
+
 ## Phase selection
 
 A run may be given a subset of phases in its task payload rather than the full sequence,

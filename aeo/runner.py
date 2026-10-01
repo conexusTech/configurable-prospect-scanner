@@ -511,6 +511,90 @@ def explain_scored(
     return attached
 
 
+def attach_verified_locations(
+    scored: list[dict[str, Any]], prospects: list[dict[str, Any]]
+) -> int:
+    """Carry each prospect's `verified_location` onto its scored item; return how many.
+
+    A scored item is a different object from the prospect and keys on `prospect_id` where
+    the prospect keys on `id` -- the mismatch that once dropped every score explanation --
+    so the join is explicit. Items whose prospect has no marker are left without one, which
+    is what keeps their location off the wire (see `map_scored_event`).
+    """
+    markers = {
+        str(p["id"]): p["verified_location"]
+        for p in prospects
+        if p.get("id") and isinstance(p.get("verified_location"), dict)
+    }
+    attached = 0
+    for item in scored:
+        marker = markers.get(str(item.get("prospect_id")))
+        if marker is not None:
+            item["verified_location"] = dict(marker)
+            attached += 1
+    return attached
+
+
+def blind_gate_warning(
+    scored: list[dict[str, Any]], scoring_cfg: dict[str, Any] | None, scan_run_id: str
+) -> str | None:
+    """A warning line when a gated run's target-market gate could not be evaluated.
+
+    A gate that cannot pass a lead fails it CLOSED, and the run still reports normally --
+    so a skill whose leads all lack a state, or whose gate has nothing to match against,
+    yields nothing and looks healthy. Three distinct causes, each worded as itself:
+
+    - **no gate configured**: a gated config with no `gate.target_market` block, or one
+      with no `allowed_states`. `in_target_market` refuses every lead then, so this is
+      NOT quiet -- an unevaluable gate that fails everything is the case this exists for;
+    - **no state**: strictly MORE than half of the scored leads have no value in the
+      gate's state field (exactly half does not trip it);
+    - **none passed**: not one scored lead passed the gate.
+
+    None for a non-gated run (nothing to evaluate) and for a run that scored nothing.
+    Never raises: it runs on the way to the wire, and a malformed item must not cost a run
+    its results.
+    """
+    if not _is_gated({"scoring": scoring_cfg}) or not scored:
+        return None
+    cfg: dict[str, Any] = scoring_cfg or {}  # `_is_gated` is False for a non-dict
+
+    gate = cfg.get("gate")
+    target = gate.get("target_market") if isinstance(gate, dict) else None
+    if not isinstance(target, dict) or not target.get("allowed_states"):
+        return (
+            f"run {scan_run_id}: no target-market gate configured (no allowed states), "
+            f"so all {len(scored)} scored lead(s) fail the gate closed"
+        )
+
+    field = str(target.get("state_field") or "state")
+
+    def _state(item: Any) -> Any:
+        if not isinstance(item, dict):
+            return None
+        value = item.get(field)
+        if value is None and isinstance(item.get("fields"), dict):
+            value = item["fields"].get(field)
+        return value
+
+    def _passed(item: Any) -> bool:
+        factors = item.get("score_factors") if isinstance(item, dict) else None
+        gated = factors.get("gated") if isinstance(factors, dict) else None
+        gates = gated.get("gates") if isinstance(gated, dict) else None
+        return isinstance(gates, dict) and gates.get("target_market") is True
+
+    total = len(scored)
+    empty = sum(1 for item in scored if not str(_state(item) or "").strip())
+    problems = []
+    if empty * 2 > total:
+        problems.append(f"{empty} of {total} scored lead(s) have no {field}")
+    if not any(_passed(item) for item in scored):
+        problems.append(f"no lead passed the gate ({total} scored)")
+    if not problems:
+        return None
+    return f"run {scan_run_id}: " + "; ".join(problems)
+
+
 def _resolve_signal_fields(
     pipeline_vocab: dict[str, Any], prospects: list[dict[str, Any]]
 ) -> list[str]:
@@ -1074,6 +1158,19 @@ def main() -> int:
         _log(f"scoring {len(prospects)} prospect(s)")
         scored = als.score_prospects(prospects, tool_context, today=today)
         _log(f"scored {len(scored)} prospect(s)")
+
+        # The verified location onto the scored items. Only the wire depends on this
+        # ordering: `map_scored_event` emits the location from this marker. The score and
+        # the explanation already follow the verified location without it -- the scorer
+        # reads `_internal`, and `explain_scored` reads the item's `state`, which comes
+        # from that same `_internal`.
+        _log(
+            "carried a verified location onto "
+            f"{attach_verified_locations(scored, prospects)}/{len(scored)} scored prospect(s)"
+        )
+        blind = blind_gate_warning(scored, tool_context.get("scoring"), scan_run_id)
+        if blind:
+            _log(f"WARNING target-market gate: {blind}")
 
         # Why this lead scored what it scored — see `explain_scored`.
         explain_scored(

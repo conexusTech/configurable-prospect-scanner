@@ -30,7 +30,9 @@ and one dead import.
 Putting a town in a query does not mean the results are in that town. Discovery therefore
 runs as a **search, verify, re-search loop**: candidates are checked for being genuinely
 in-area and the search is repeated as needed, bounded by a configured round limit and a
-strictness setting.
+strictness setting. A lead that is kept is relocated to its verified address when that
+address is itself in the target area, so the location it is scored on and stored under is the
+verified one rather than whatever discovery reported.
 
 Separately, market names are substituted into each source's query templates. That
 substitution is recorded in the code as the actual root cause of geography drift — the

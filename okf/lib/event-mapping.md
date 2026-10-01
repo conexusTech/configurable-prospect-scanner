@@ -32,5 +32,16 @@ pocket.** It carries the resolved sales-pipeline stage and where that stage came
 Putting unrelated extras there because it happens to be an open object is how a
 side-channel becomes an undocumented second schema.
 
+**A scored lead carries a location only if it was verified.** The engine's scored item
+always has a city and state — discovery's raw values — and those are deliberately not on the
+fixed list. A lead the geography step verified AND relocated (its verified location was itself in the scan area) sends its normalised city, state and ZIP
+(state one of the 51 US codes the gateway accepts); any other lead sends none, and the
+internal marker itself is never sent, because the gateway rejects unknown fields.
+
+⚠️ **Deploy precondition: this scanner must not ship before the gateway carries `aeo-backend`
+`fca4d0e`.** Until then the gateway does not declare the three location fields, and because it
+rejects undeclared fields, a verified lead's city, state and ZIP would 400 **every** scored
+callback of the run, not just that lead's.
+
 Prospect and scored events pass a fixed field list through rather than forwarding whatever
 the engine produced, so an engine change cannot silently widen what this scanner sends.

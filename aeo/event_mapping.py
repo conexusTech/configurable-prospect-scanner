@@ -90,7 +90,13 @@ SCORED_PASSTHROUGH = (
     # rejects the WHOLE scored callback, not just the field. Gateway first, always.
     "score_explanation",
     "priority_band",
+    # NOT `city` / `state` / `zip_code`: the engine's item always carries discovery's raw
+    # values, and those must not be sent for a lead that was never verified. They are
+    # emitted from `verified_location` in `map_scored_event` instead.
 )
+
+#: The location parts a verified lead may send, read from its `verified_location` marker.
+VERIFIED_LOCATION_FIELDS = ("city", "state", "zip_code")
 
 # Fields on the engine's `prospects` item that map straight onto AEO columns.
 #: ⚠️ **A field absent here can never reach its column, however well it was collected.**
@@ -188,6 +194,15 @@ def map_scored_event(event: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         out = {k: item[k] for k in SCORED_PASSTHROUGH if item.get(k) is not None}
+
+        # A location rides the wire ONLY when the geography step verified it. The marker
+        # itself is internal and is never emitted: `forbidNonWhitelisted` would 400 the
+        # whole callback. Values were normalised when the marker was written.
+        verified = item.get("verified_location")
+        if isinstance(verified, dict):
+            for key in VERIFIED_LOCATION_FIELDS:
+                if verified.get(key) is not None:
+                    out[key] = verified[key]
 
         # `scoring_payload` carries `pipeline_status` and NOTHING ELSE.
         #
