@@ -83,7 +83,7 @@
   run from a sibling scanner skill, used by a fidelity test that asserts this engine
   reproduces the same ranking and bands **from configuration alone**. That is the strongest
   evidence available that "many skills, one runtime" actually holds; it belongs committed.
-  Owner: Joe.
+  Owner: Leo.
 
 ## 2026-09-09
 
@@ -162,7 +162,7 @@
   show `commercial-flooring-prospect-scanner` at 498 scored / 348 with `signals_found`;
   neither is 306. Left alone deliberately — it is an illustrative figure in an exception
   docstring, not a claim anyone builds on, and correcting it was outside what was asked.
-  Flagged so the next reader knows it is approximate. Owner: Joe.
+  Flagged so the next reader knows it is approximate. Owner: Leo.
 
 - **Update** — MYgroup's two 2026-08-27 runs rescored onto the gated model, 69 rows.
   **Local first, then production the same day** — this line read "local database only" until
@@ -179,7 +179,7 @@
   trusted; no engine file in the diff.
 
   ⚠️ **This entry replaces one written earlier the same day** which said the banner was
-  "left in place … Owner: Joe". That was true for about an hour and would have sent the
+  "left in place … Owner: Leo". That was true for about an hour and would have sent the
   next reader looking for finished work. Rewritten rather than appended-to because the log
   is read top-down for current state, and two entries on one date disagreeing about
   whether a thing is done is the same defect the roadmap has now made three times.
@@ -224,7 +224,7 @@
   band table — `Hot 75-100 / Warm 50-74 / Cold 0-49` — which is neither the live config's
   (`80-100 / 46-79 / 0-45`) nor the legacy stored labels. Not corrected: the session that
   found it was scoped to the `window_stages` claim in the same file. Same orphaned-document
-  problem as that one. Owner: Joe.
+  problem as that one. Owner: Leo.
 
 - **Update** — The MYgroup rescore is **in production** as of 2026-09-09, applied and verified
   locally first. 69 rows, four columns (`score`, `priority_band`, `rank`, `score_factors`),
@@ -245,7 +245,7 @@
   separate script taking its connection from the running production Deployment's own
   Kubernetes Secret: identity by **provenance**, which a stale env file cannot redirect.
   Roadmap row `fix-prod-detection-in-rescore-writer`, and its acceptance criterion is the
-  **refusal being demonstrated**, not the rule being written. Owner: Joe.
+  **refusal being demonstrated**, not the rule being written. Owner: Leo.
 
 - **Learning** — **Bringing a verified local result to production is a delta, never a
   replace.** Production held 5 `read` flags on these rows and its own stage history; the
@@ -313,7 +313,7 @@
 - **Learning** — ⚠️ **The production-writing tools live in `.temp/verify`, gitignored, so
   they cannot be committed, reviewed, CI-tested or caught by a PR** — and one has now
   written to production nine times. Every security blocker found traces to that. Worth its
-  own change: move this tooling into a repo with tests. Owner: Joe.
+  own change: move this tooling into a repo with tests. Owner: Leo.
 
 - **Learning** — **`is_future` has a measured, deliberate limitation: a PARTIAL date whose
   ambiguity window straddles the run date is admitted.** `_parse_partial` resolves to the
