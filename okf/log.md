@@ -1,5 +1,23 @@
 # OKF Log
 
+## 2026-10-01
+
+- **Update** — `store-score-explanations` landed. Score explanations now reach the gateway:
+  `explain_scores` filed results under `id` while the engine's scored items carry only
+  `prospect_id`, so every paragraph on every gated run was generated, billed and dropped
+  (0/89 Wheelhouse `abfabc01`, 0/145 Matrix Frame `3514396d`; ~$15 of a $79 run). One key
+  helper now serves the phase and the runner, the runner step is a testable function
+  (`explain_scored`), and the validator also withholds control characters (a NUL would make
+  the gateway's single-statement update reject the whole scored batch) and links or contact
+  details (only injected scraped text could put one there). Seeded the repo's first
+  capability, `score-explanations`, and its QA checklist. Not yet deployed: needs an image
+  build and a catalog re-pin.
+
+- **Learning** — A test fixture that invents the producer's shape is how this survived: every
+  explanation test used `"id": "p1"`, which the engine never writes. The new tests build leads
+  through the real assembler and scorer, the same lesson `ai_judgment`'s `_by_source` defect
+  taught. Prefer the producer over a hand-written dict for anything crossing a module seam.
+
 ## 2026-09-02
 
 - **Update** — Bundle authored. This repo had no OKF bundle and was named in no process

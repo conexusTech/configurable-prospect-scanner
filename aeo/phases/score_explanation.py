@@ -122,6 +122,11 @@ def build_facts(breakdown: dict[str, Any], lead: dict[str, Any]) -> list[str]:
 
 _NUM = re.compile(r"\b\d[\d,]*\b")
 
+_LINK_OR_CONTACT = re.compile(
+    r"https?://|www\.|\w@\w|\b[a-z0-9-]+\.(?:com|net|org|io|co|ai|us|biz|info|app|dev)\b",
+    re.IGNORECASE,
+)
+
 
 def validate_explanation(
     text: str, breakdown: dict[str, Any], lead: dict[str, Any]
@@ -142,6 +147,14 @@ def validate_explanation(
         return f"too long ({len(text)} chars)"
     if any(m in text for m in ("- ", "**", "##", "\n\n")):
         return "contains markup or bullets"
+    # A NUL copied from a scraped finding makes Postgres reject the gateway's
+    # single-statement UPDATE for the WHOLE scored batch, not just this lead.
+    if any((ord(c) < 32 and c not in "\t\n\r") or ord(c) == 127 for c in text):
+        return "contains a control character"
+    # The facts never contain a link or contact detail, so any that appears came from
+    # injected scraped text — and this paragraph is shown to customers.
+    if _LINK_OR_CONTACT.search(text):
+        return "contains a link or contact detail"
 
     allowed: set[str] = set()
     for value in (
@@ -160,6 +173,21 @@ def validate_explanation(
     for n in _NUM.findall(text):
         if n.replace(",", "") not in allowed:
             return f"states a number not in its inputs: {n}"
+    return None
+
+
+def explanation_key(item: dict[str, Any]) -> Optional[str]:
+    """The one identifier an explanation is filed and looked up under, or ``None``.
+
+    The engine writes `prospect_id` on every scored item; fixtures and older callers use
+    `id`. Keying on `id` alone filed every real paragraph under "None" and the runner's
+    lookup by `prospect_id` never found one. One helper, used by the phase and the runner
+    alike, so they cannot choose different keys again — that drift is the defect.
+    """
+    for field in ("prospect_id", "id"):
+        value = item.get(field)
+        if value:
+            return str(value)
     return None
 
 
@@ -189,10 +217,15 @@ def explain_scores(
     # timeout with a thread, caps concurrency, and emits a liveness heartbeat. Reusing
     # it is also why this phase now behaves the same way under load as `ai_judgment`
     # rather than having its own failure mode.
-    prepared: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+    prepared: list[tuple[dict[str, Any], dict[str, Any], str, str]] = []
     for p in prospects:
         breakdown = ((p.get("score_factors") or {}).get("gated")) or {}
         if not breakdown:
+            continue
+        key = explanation_key(p)
+        if key is None:
+            # Nothing could be attached to it, so a paragraph would be paid for and
+            # dropped — or worse, filed under "None" for the next keyless lead to share.
             continue
         facts = build_facts(breakdown, p)
         prepared.append(
@@ -200,11 +233,12 @@ def explain_scores(
                 p,
                 breakdown,
                 _PROMPT.format(facts=NEWLINE.join(facts), max_chars=MAX_CHARS),
+                key,
             )
         )
 
-    def _one(item: tuple[dict[str, Any], dict[str, Any], str]) -> Optional[str]:
-        _p, _breakdown, prompt = item
+    def _one(item: tuple[dict[str, Any], dict[str, Any], str, str]) -> Optional[str]:
+        _p, _breakdown, prompt, _key = item
         # 🔴 `grounded=False` EXPLICITLY, and every kwarg named rather than splatted.
         # `gemini_provider` defaults `grounded=True`, so `provider(prompt,
         # **provider_config)` silently bought a Google Search on every prospect —
@@ -232,13 +266,13 @@ def explain_scores(
         timeout_s=float(provider_config.get("timeout_s", DEFAULT_CALL_TIMEOUT_S)),
         on_error=lambda item, exc: emit(
             {"type": "score_explanation_failed",
-             "prospect_id": item[0].get("id"), "error": str(exc)}
+             "prospect_id": item[3], "error": str(exc)}
         ) if emit else None,
         label="explanations",
     )
 
     out: dict[str, str] = {}
-    for (p, breakdown, _prompt), raw in zip(prepared, raw_results):
+    for (p, breakdown, _prompt, key), raw in zip(prepared, raw_results):
         if raw is None:
             continue  # failed or timed out; `on_error` already emitted
         text = str(raw or "").strip().strip('"')
@@ -246,7 +280,30 @@ def explain_scores(
         if reason:
             if emit:
                 emit({"type": "score_explanation_rejected",
-                      "prospect_id": p.get("id"), "reason": reason})
+                      "prospect_id": key, "reason": reason})
             continue
-        out[str(p.get("id"))] = text
+        out[key] = text
     return out
+
+
+def attach_explanations(
+    scored: Sequence[dict[str, Any]], explanations: dict[str, str]
+) -> int:
+    """Set `score_explanation` on each scored item that has a paragraph; return how many.
+
+    Uses `explanation_key`, the same helper `explain_scores` files results under, so the
+    runner cannot look a lead up by a different key than the phase wrote it with.
+
+    **Absent stays ABSENT.** An item with no key, no paragraph or an empty one is left
+    without the field — no fallback string, no empty string.
+    """
+    attached = 0
+    for item in scored:
+        key = explanation_key(item)
+        if key is None:
+            continue
+        text = explanations.get(key)
+        if text:
+            item["score_explanation"] = text
+            attached += 1
+    return attached

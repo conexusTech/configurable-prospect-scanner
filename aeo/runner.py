@@ -80,7 +80,7 @@ from aeo.phases.query_expansion import (  # noqa: E402
     unexpanded_placeholders,
 )
 from aeo.phases.ai_judgment import judge_prospects
-from aeo.phases.score_explanation import explain_scores
+from aeo.phases.score_explanation import attach_explanations, explain_scores
 from aeo.phases.enrichment import enrich_prospects  # noqa: E402
 from aeo.phases.validation import surviving_ids, validate_prospects  # noqa: E402
 from aeo.phases.zip_discovery import (  # noqa: E402
@@ -469,6 +469,46 @@ def _is_gated(tool_context: dict[str, Any]) -> bool:
     if not isinstance(scoring, dict):
         return False
     return str(scoring.get("model") or "").strip().lower() == "gated"
+
+
+def explain_scored(
+    scored: list[dict[str, Any]],
+    *,
+    gated: bool,
+    provider: Any,
+    provider_config: dict[str, Any],
+    emit: Any,
+) -> int:
+    """Write and attach the score explanations; return how many items now carry one.
+
+    A module-level function rather than inline in `main()` so the step the runner takes
+    between the phase and the wire can be driven offline with producer-shaped items.
+    """
+    # ── why this lead scored what it scored ─────────────────────────
+    #
+    # 🔑 AFTER scoring, and that is the entire fix. `ai_analysis` reads as nonsense
+    # because it is written in the judgment phase BEFORE the score exists and is
+    # never handed it — its prompt literally says "Stay stage reasoning". A model
+    # asked to explain a number it has not seen cannot do it.
+    #
+    # Gated skills only: a legacy prospect has no breakdown to explain from, so the
+    # pass skips it and spends nothing. Non-grounded, so it costs no search quota.
+    if not (gated and scored):
+        return 0
+    explanations = explain_scores(
+        scored,
+        provider=provider,
+        provider_config=provider_config,
+        emit=emit,
+    )
+    # Absent stays ABSENT. A rejected explanation renders as none, which is
+    # honest; a fallback string would be indistinguishable from a real one.
+    attached = attach_explanations(scored, explanations)
+    _log(
+        f"explained {attached}/{len(scored)} prospect(s); "
+        f"{len(scored) - attached} had no usable explanation"
+    )
+    return attached
 
 
 def _resolve_signal_fields(
@@ -1035,32 +1075,14 @@ def main() -> int:
         scored = als.score_prospects(prospects, tool_context, today=today)
         _log(f"scored {len(scored)} prospect(s)")
 
-        # ── why this lead scored what it scored ─────────────────────────
-        #
-        # 🔑 AFTER scoring, and that is the entire fix. `ai_analysis` reads as nonsense
-        # because it is written in the judgment phase BEFORE the score exists and is
-        # never handed it — its prompt literally says "Stay stage reasoning". A model
-        # asked to explain a number it has not seen cannot do it.
-        #
-        # Gated skills only: a legacy prospect has no breakdown to explain from, so the
-        # pass skips it and spends nothing. Non-grounded, so it costs no search quota.
-        if _is_gated(tool_context) and scored:
-            explanations = explain_scores(
-                scored,
-                provider=provider,
-                provider_config=provider_config,
-                emit=sink.emit,
-            )
-            for item in scored:
-                text = explanations.get(str(item.get("prospect_id") or item.get("id")))
-                # Absent stays ABSENT. A rejected explanation renders as none, which is
-                # honest; a fallback string would be indistinguishable from a real one.
-                if text:
-                    item["score_explanation"] = text
-            _log(
-                f"explained {len(explanations)}/{len(scored)} prospect(s); "
-                f"{len(scored) - len(explanations)} had no usable explanation"
-            )
+        # Why this lead scored what it scored — see `explain_scored`.
+        explain_scored(
+            scored,
+            gated=_is_gated(tool_context),
+            provider=provider,
+            provider_config=provider_config,
+            emit=sink.emit,
+        )
 
         # The model's reasoning onto the scored item, so it reaches
         # `prospects.ai_analysis` through `SCORED_PASSTHROUGH`. The engine puts the

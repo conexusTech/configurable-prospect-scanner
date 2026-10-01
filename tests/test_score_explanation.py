@@ -13,10 +13,13 @@ costs the number its credibility permanently.
 import pytest
 
 from aeo.phases.ai_judgment import _ADJUSTMENT_FIELD, _FIT_SECTION
+from aeo.event_mapping import map_event
 from aeo.phases.score_explanation import (
     MAX_CHARS,
+    attach_explanations,
     build_facts,
     explain_scores,
+    explanation_key,
     validate_explanation,
 )
 
@@ -96,6 +99,32 @@ class TestTheValidator:
 
     def test_rejects_something_far_too_long(self):
         assert validate_explanation("word " * 400, BREAKDOWN, LEAD) is not None
+
+    def test_rejects_a_control_character(self):
+        # A NUL makes Postgres reject the whole scored batch's UPDATE, not one row.
+        text = "Worth a call.\x00 Good fit."
+        assert validate_explanation(text, BREAKDOWN, LEAD) == "contains a control character"
+
+    def test_a_single_newline_is_not_a_control_character(self):
+        assert validate_explanation("Worth a call.\nGood fit.", BREAKDOWN, LEAD) is None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "See http://example.org/offer for the detail.",
+            "Their site acme-leads.net lists the project.",
+            "Reach name@example.com about it.",
+            "Visit www.acme for the detail.",
+        ],
+    )
+    def test_rejects_a_link_or_contact_detail(self, text):
+        assert validate_explanation(text, BREAKDOWN, LEAD) == (
+            "contains a link or contact detail"
+        )
+
+    def test_an_ordinary_sentence_with_abbreviations_is_not_a_link(self):
+        text = "Acme Inc. is a St. Louis employer with an RFP dated 2026-08-06."
+        assert validate_explanation(text, BREAKDOWN, LEAD) is None
 
 
 class TestThePass:
@@ -308,3 +337,257 @@ class TestItCannotHangThePhase:
         # p2 survives. Order-preserving mapping is what makes this safe to assert.
         assert "p2" in out
         assert "p1" not in out
+
+
+class TestAttachesToTheProducerShape:
+    """🔴 The defect every test above was blind to: the engine emits `prospect_id`, not `id`.
+
+    `explain_scores` filed each paragraph under `str(p.get("id"))`, the scored items the
+    engine produces carry `prospect_id` and no `id`, and the runner looks each one up by
+    `prospect_id` — so every lookup missed, no explanation was ever attached, and the
+    phase was still billed (89 calls, ~$15 of one run). The fixtures above all use
+    `"id": "p1"`, which is exactly the shape the producer does not write.
+
+    So these build their leads THROUGH the producer: assemble, then score under a gated
+    config. A hand-written dict here would pass against the defect again.
+    """
+
+    OBSERVED = {
+        "Acme Benefits Group": "Opened a broker review for the Harbor district office.",
+        "Birch Logistics": "Posted a request for proposals covering the Ridge depot.",
+        "Cedar Dental": "Named a new people lead after the Lakeside merger.",
+    }
+
+    @staticmethod
+    def _produced(names_to_description):
+        """Scored items from the real assembler and the real scorer, gated."""
+        from datetime import date
+
+        import av_lead_scanner as als
+        from tests.test_gated_score import CFG
+
+        prospects = []
+        for name, description in names_to_description.items():
+            raw = {
+                "company_name": name,
+                "state": "NC",
+                "employee_count": "250",
+                "key_contact": "A Contact",
+                "contact_email": "a@b.c",
+            }
+            groups = {
+                als.normalize_name(name): [
+                    {"raw": raw, "source": "in_market_triggers", "name_field": "company_name"}
+                ]
+            }
+            p = als._assemble_prospects(
+                groups=groups, scan_run_id="r1", canonical=tuple(raw)
+            )[0]
+            p["validation_data"] = {
+                "switching_signal": [
+                    {
+                        "signal_type": "rfp activity",
+                        "signal_class": "rfp_active",
+                        "signal_date": "2026-08-01",
+                        "signal_description": description,
+                    }
+                ]
+            }
+            p["_ai_judgment"] = {"pipeline_status": "4 - Active Pursuit"}
+            prospects.append(p)
+
+        ctx = {
+            "scoring": {**CFG, "score_cap": 100},
+            "pipeline": {"stages": [
+                {"key": "4 - Active Pursuit", "min_months": 4, "max_months": 8,
+                 "kind": "timing"}]},
+            "skill_type": "customer",
+        }
+        scored = als.score_prospects(prospects, ctx, today=date(2026, 8, 27))
+
+        # Document the shape this class relies on, so it cannot drift unnoticed.
+        assert len(scored) == len(names_to_description)
+        for item in scored:
+            assert item.get("prospect_id"), "the producer must name the lead"
+            assert "id" not in item, "the producer writes prospect_id, never id"
+            assert item["score_factors"].get("gated"), "needs a gated breakdown"
+        return scored
+
+    @staticmethod
+    def _by_name(scored):
+        return {item["company_name"]: item for item in scored}
+
+    @staticmethod
+    def _observed_in(prompt):
+        import re
+
+        return re.search(r'What we observed: "(.*)"', prompt).group(1)
+
+    def _provider(self):
+        # `build_facts` does not put the company name in the prompt, so the per-lead
+        # discriminator is the quoted finding, which does.
+        def provider(prompt, **_kw):
+            return f"Worth a call. We saw that it {self._observed_in(prompt)}"
+
+        return provider
+
+    def test_every_lead_with_an_accepted_paragraph_carries_it(self):
+        scored = self._produced(self.OBSERVED)
+        explanations = explain_scores(
+            scored, provider=self._provider(), provider_config={}
+        )
+        attach_explanations(scored, explanations)
+
+        assert len(scored) == len(self.OBSERVED)
+        for item in scored:
+            assert item.get("score_explanation"), item["company_name"]
+
+    def test_the_scored_callback_carries_the_paragraph(self):
+        scored = self._produced(self.OBSERVED)
+        by_name = self._by_name(scored)
+        unexplained = by_name["Cedar Dental"]
+        explained = by_name["Acme Benefits Group"]
+
+        def provider(prompt, **_kw):
+            if "Lakeside" in prompt:
+                raise RuntimeError("no paragraph for this one")
+            return self._provider()(prompt)
+
+        explanations = explain_scores(scored, provider=provider, provider_config={})
+        attach_explanations(scored, explanations)
+
+        mapped = map_event({"type": "scored", "items": scored})
+        assert [kind for kind, _ in mapped] == ["scored"]
+        payload_items = {i["prospect_id"]: i for i in mapped[0][1]["data"]}
+
+        sent = payload_items[explained["prospect_id"]]
+        assert sent["score_explanation"] == explained["score_explanation"]
+        assert "Harbor district" in sent["score_explanation"]
+        assert "score_explanation" not in payload_items[unexplained["prospect_id"]]
+
+    def test_two_leads_never_swap_paragraphs(self):
+        scored = self._produced(self.OBSERVED)
+        explanations = explain_scores(
+            scored, provider=self._provider(), provider_config={}
+        )
+        attach_explanations(scored, explanations)
+
+        for name, item in self._by_name(scored).items():
+            text = item.get("score_explanation") or ""
+            assert self.OBSERVED[name] in text, name
+            for other, description in self.OBSERVED.items():
+                if other != name:
+                    assert description not in text, f"{name} carries a paragraph written for {other}"
+
+    def test_a_lead_with_no_identifier_is_not_explained(self):
+        scored = self._produced({
+            "Acme Benefits Group": self.OBSERVED["Acme Benefits Group"],
+            "Birch Logistics": self.OBSERVED["Birch Logistics"],
+        })
+        identified, other = scored
+        keyless = {k: v for k, v in other.items() if k not in ("prospect_id", "id")}
+        assert "prospect_id" not in keyless and "id" not in keyless
+
+        calls = []
+        base = self._provider()
+
+        def provider(prompt, **kw):
+            calls.append(prompt)
+            return base(prompt, **kw)
+
+        out = explain_scores(
+            [identified, keyless], provider=provider, provider_config={}
+        )
+
+        assert len(calls) == 1, "a lead nothing can be attached to must not be paid for"
+        assert "None" not in out
+        assert list(out) == [identified["prospect_id"]]
+
+    def test_an_empty_string_identifier_is_not_explained(self):
+        scored = self._produced({"Acme Benefits Group": self.OBSERVED["Acme Benefits Group"],
+                                 "Birch Logistics": self.OBSERVED["Birch Logistics"]})
+        identified, other = scored
+        blank = {**other, "prospect_id": ""}
+
+        calls = []
+        base = self._provider()
+
+        def provider(prompt, **kw):
+            calls.append(prompt)
+            return base(prompt, **kw)
+
+        out = explain_scores([identified, blank], provider=provider, provider_config={})
+
+        assert len(calls) == 1
+        assert list(out) == [identified["prospect_id"]]
+
+    def test_prospect_id_wins_when_both_keys_are_present(self):
+        # The engine writes `prospect_id`; `id` is the fixtures' and older callers' name.
+        assert explanation_key({"prospect_id": "a", "id": "b"}) == "a"
+
+        item = {**LEAD, "prospect_id": "a", "id": "b"}
+        out = explain_scores(
+            [item],
+            provider=lambda *_a, **_k: "A North Carolina employer with an RFP dated 2026-08-06.",
+            provider_config={},
+        )
+        assert list(out) == ["a"]
+        assert attach_explanations([item], out) == 1
+        assert item["score_explanation"] == out["a"]
+
+    def test_the_runner_step_attaches_to_producer_output(self):
+        from aeo.runner import explain_scored
+
+        scored = self._produced(self.OBSERVED)
+        attached = explain_scored(
+            scored,
+            gated=True,
+            provider=self._provider(),
+            provider_config={},
+            emit=lambda _e: None,
+        )
+
+        assert attached == len(self.OBSERVED)
+        for name, item in self._by_name(scored).items():
+            assert self.OBSERVED[name] in item["score_explanation"], name
+
+    def test_the_runner_step_does_nothing_for_a_legacy_run(self):
+        from aeo.runner import explain_scored
+
+        scored = self._produced(self.OBSERVED)
+        calls = []
+
+        def provider(prompt, **_kw):
+            calls.append(prompt)
+            return "unused"
+
+        attached = explain_scored(
+            scored, gated=False, provider=provider, provider_config={}, emit=lambda _e: None
+        )
+
+        assert attached == 0 and calls == []
+        assert all("score_explanation" not in item for item in scored)
+
+    def test_failure_and_rejection_events_name_the_real_lead(self):
+        scored = self._produced(self.OBSERVED)
+        by_name = self._by_name(scored)
+
+        def provider(prompt, **_kw):
+            if "Harbor district" in prompt:
+                raise RuntimeError("provider blew up")
+            if "Ridge depot" in prompt:
+                return "Call 555 today."  # a number that is in none of its inputs
+            return self._provider()(prompt)
+
+        events: list[dict] = []
+        out = explain_scores(
+            scored, provider=provider, provider_config={}, emit=events.append
+        )
+
+        failed = [e for e in events if e["type"] == "score_explanation_failed"]
+        rejected = [e for e in events if e["type"] == "score_explanation_rejected"]
+        assert len(failed) == 1 and len(rejected) == 1
+        assert failed[0]["prospect_id"] == by_name["Acme Benefits Group"]["prospect_id"]
+        assert rejected[0]["prospect_id"] == by_name["Birch Logistics"]["prospect_id"]
+        assert failed[0]["prospect_id"] and rejected[0]["prospect_id"]
+        assert list(out) == [by_name["Cedar Dental"]["prospect_id"]]
