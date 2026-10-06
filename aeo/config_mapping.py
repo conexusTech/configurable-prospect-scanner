@@ -28,6 +28,9 @@ Design rules, in order of importance:
 
 from __future__ import annotations
 
+import html
+import re
+
 from typing import Any
 
 # Keys the engine requires on every entry of `sources`. `seed_firms` is optional —
@@ -261,6 +264,46 @@ def _resolved_markets(context: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(markets))
 
 
+_TAGS = re.compile(r"<[^>]+>")
+_PRODUCTS_MAX_CHARS = 2000
+
+#: The text `aeo-skill-builder-runtime` seeds into every new skill's
+#: `product_description` (`runtime.py`, the skeleton call). Matched exactly in shape so
+#: that nothing an operator wrote can be mistaken for it.
+_BUILDER_PLACEHOLDER = re.compile(r"^Prospect-scanning skill for the .{1,80} vertical\.$")
+
+
+def _is_builder_placeholder(text: Any) -> bool:
+    return bool(_BUILDER_PLACEHOLDER.match(" ".join(str(text or "").split())))
+
+
+def _products_description(products: Any) -> str | None:
+    """Every product the org sells, one per line, as plain text.
+
+    Onboarding stores product descriptions as rich-text HTML, and a model reading
+    `<ul><li><p>` spends attention on markup. All products, not the first: a seller of
+    three things is judged against all three, or a lead for the second scores as a
+    misfit. Accepts the bare list and the `{"products": [...]}` wrapper.
+    """
+    if isinstance(products, dict):
+        products = products.get("products")
+    if not isinstance(products, list):
+        return None
+    lines: list[str] = []
+    for item in products:
+        if not isinstance(item, dict):
+            continue
+        name = " ".join(str(item.get("name") or "").split())
+        desc = " ".join(
+            html.unescape(_TAGS.sub(" ", str(item.get("description") or ""))).split()
+        )
+        line = f"{name}: {desc}" if name and desc else name or desc
+        if line:
+            lines.append(f"- {line}")
+    # Bounded: this text is repeated in every per-prospect prompt of the run.
+    return "\n".join(lines)[:_PRODUCTS_MAX_CHARS] or None
+
+
 def build_tool_context(
     context: dict[str, Any],
     *,
@@ -296,16 +339,23 @@ def build_tool_context(
             "geography, not the skill."
         )
 
-    product_description = config.get("product_description")
-    if not product_description:
-        # Fall back to the org's own products before failing: the description is
-        # what the model uses to judge fit, and an org that never authored one in
-        # the builder may still have products from onboarding.
-        products = context.get("products_services") or []
-        if products and isinstance(products, list):
-            first = products[0]
-            if isinstance(first, dict):
-                product_description = first.get("description") or first.get("name")
+    # 🔴 **The builder's seeded placeholder is not a description.** `aeo-skill-builder-
+    # runtime` seeds every skill with "Prospect-scanning skill for the <vertical>
+    # vertical." and nothing replaces it — all seven builder-created skills carried it on
+    # 2026-10-06. Because an authored description wins over the org's products, the
+    # stage judge, discovery and contacts were all told that every seller sells
+    # prospect-scanning software: 78 of 233 stage analyses on two customers' runs of
+    # 2026-09 reasoned about the prospect's "need for prospect-scanning tools". A
+    # genuinely authored description still wins — that is what an operator accepted —
+    # but the placeholder yields to what the org actually sells.
+    authored = config.get("product_description")
+    product_description = (
+        None if _is_builder_placeholder(authored) else authored
+    ) or _products_description(context.get("products_services"))
+    # An org with no usable products keeps the placeholder rather than failing the run:
+    # a vague description was the state of every run before this change, and refusing
+    # would stop every such skill the moment the image deploys.
+    product_description = product_description or authored
     if not product_description:
         problems.append(
             "No `product_description` in the skill config and no products on the "

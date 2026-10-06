@@ -27,6 +27,7 @@ hard way there:
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any, Callable
 
 from aeo.phases._batching import (
@@ -42,6 +43,7 @@ from aeo.phases._concurrent import (
     concurrency_from,
     map_bounded,
 )
+from aeo.gated_score import age_months, freshness_months, requires_configured_signal
 from aeo.signal_class import classify
 
 #: `validation_data` keys owned by the qualification verdict. A lane may not take one of
@@ -199,6 +201,113 @@ numbered list above. Each object must be:
 Return only the JSON array."""
 
 
+def constrain_signal_lane(
+    lanes: Any,
+    scoring: dict[str, Any] | None,
+    today: date,
+    log: Callable[[str], None] | None = None,
+) -> Any:
+    """Narrow the lane the gate reads to the skill's own buying signals and window.
+
+    Applies only when the skill sets ``gate.buying_window.require_configured_signal``.
+    Then the lane named by ``scoring.signal_source`` gets the labels the skill's
+    ``signal_strength.classes`` declares (with ``signal_strength.definitions`` as their
+    meaning, when authored) and the earliest date the gate will accept.
+
+    🔴 **Why the collector has to be told, not just the scorer.** With a free-text
+    ``signal_type`` the model reports whatever dated news it finds — Matrix Frame's run of
+    2026-09-08 came back as "project completion" ×28, awards and acquisitions, and **none**
+    of its 19 qualified leads carried a type its config names. A gate that then refuses
+    unnamed types would refuse everything: the strictness has to start where the evidence
+    is collected, in the vocabulary the gate will read.
+
+    Returns new lane dicts; the authored config is never mutated.
+    """
+    scoring = scoring or {}
+    gate = scoring.get("gate") or {}
+    if not requires_configured_signal(gate.get("buying_window") or {}):
+        return lanes
+    strength = ((scoring.get("bonus") or {}).get("signal_strength")) or {}
+    classes = strength.get("classes") or {}
+    if not classes or not isinstance(lanes, (list, tuple)):
+        if log:
+            log("enrichment: require_configured_signal is set but no signal classes "
+                "are configured — every signal will be refused at the gate")
+        return lanes
+    definitions = strength.get("definitions") or {}
+    source = str(scoring.get("signal_source") or "switching_signal")
+    since = earliest_admitted(freshness_months(gate), today).isoformat()
+    out = []
+    matched = False
+    for lane in lanes:
+        if isinstance(lane, dict) and lane_key(lane) == source:
+            matched = True
+            lane = {
+                **lane,
+                "allowed_signal_types": {
+                    str(k): str(definitions.get(k) or "").strip() for k in classes
+                },
+                "signal_since": since,
+            }
+        out.append(lane)
+    if not matched and log:
+        # The gate will still refuse every unnamed signal, so an unconstrained collector
+        # reproduces "0 of 19 qualified" — say so rather than let it look like a market.
+        log(f"enrichment: require_configured_signal is set but no lane is named "
+            f"'{source}' (the scoring signal_source) — its prompt is unconstrained")
+    return out
+
+
+def earliest_admitted(months: int, today: date) -> date:
+    """The earliest date `gated_score.fresh_signals` admits on ``today``.
+
+    Computed against the gate's own arithmetic rather than by subtracting months, so the
+    prompt's "on or after" is exactly the gate's boundary — never a few days looser
+    (signals collected only to be refused) nor stricter (signals the gate wanted lost).
+    """
+    d = today
+    while True:
+        prev = d - timedelta(days=1)
+        age = age_months(prev.isoformat(), today)
+        if age is None or age >= months:
+            return d
+        d = prev
+
+
+def _signal_type_rule(lane: dict[str, Any]) -> str:
+    """The closed-vocabulary instruction for a lane `constrain_signal_lane` narrowed."""
+    allowed = lane.get("allowed_signal_types")
+    if not isinstance(allowed, dict) or not allowed:
+        return ""
+    nl = chr(10)
+    labels = nl.join(
+        f'- "{k}"' + (f": {d}" if d else "") for k, d in allowed.items()
+    )
+    since = lane.get("signal_since")
+    when = (
+        f"Report ONLY events that happened on or after {since}. An older event is not a "
+        "buying signal any more — leave it out, however relevant it is." + nl
+        if since
+        else ""
+    )
+    return (
+        'BUYING SIGNALS ONLY. "signal_type" MUST be exactly one of these labels:' + nl
+        + labels + nl
+        + when
+        + "Anything that is not one of these labels is NOT a buying signal and must be "
+        "left out — in particular awards, rankings and 'best places to work' lists, "
+        "anniversaries, financial results, and general company news." + nl
+        + "A signal is a SPECIFIC, DATED event: an announcement, launch, hire, purchase, "
+        "opening, contract or program. These are not events and must be left out: "
+        "content the company published (guides, blog posts, lists), a general "
+        "description of business it routinely does, and sponsoring or attending someone "
+        "else's event." + nl
+        + "A label applies only when the event matches its definition as written — do not "
+        "stretch one to fit. When in doubt, leave it out. A prospect with no such event "
+        "gets an empty array for this group; that is a correct answer, not a failure."
+    )
+
+
 def _group_briefs(runnable: list[dict[str, Any]]) -> str:
     """One brief per signal group, keyed by the name its output array must use."""
     nl = chr(10)
@@ -212,6 +321,9 @@ def _group_briefs(runnable: list[dict[str, Any]]) -> str:
         except (TypeError, ValueError):
             limit = None
         parts = ['GROUP "' + key + '"', objective]
+        rule = _signal_type_rule(lane)
+        if rule:
+            parts.append(rule)
         if sources:
             parts.append(sources)
         if limit:

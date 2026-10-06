@@ -57,6 +57,7 @@ from aeo.config_mapping import (  # noqa: E402
     unsupported_authored_sections,
 )
 from aeo.context_refs import UnresolvedRefError  # noqa: E402
+from aeo.gated_score import requires_configured_signal  # noqa: E402
 from aeo.context_refs import resolve as _resolve_refs  # noqa: E402
 from aeo.market_states import apply_market_binding  # noqa: E402
 from aeo.bootstrap import BootstrapError, bootstrap  # noqa: E402
@@ -82,7 +83,10 @@ from aeo.phases.query_expansion import (  # noqa: E402
 )
 from aeo.phases.ai_judgment import judge_prospects
 from aeo.phases.score_explanation import attach_explanations, explain_scores
-from aeo.phases.enrichment import enrich_prospects  # noqa: E402
+from aeo.phases.enrichment import (  # noqa: E402
+    constrain_signal_lane,
+    enrich_prospects,
+)
 from aeo.phases.validation import surviving_ids, validate_prospects  # noqa: E402
 from aeo.phases.zip_discovery import (  # noqa: E402
     DEFAULT_MAX_ZIPS_PER_MARKET,
@@ -491,6 +495,60 @@ def _pin_completeness_fields(tool_context: dict[str, Any]) -> None:
     # `or canonical` guards the degenerate case of a source whose ONLY fields are the
     # pair we appended: an empty denominator scores 0 for everyone, silently.
     completeness["fields"] = scored or canonical
+
+
+def _gated_signal_lane(tool_context: dict[str, Any]) -> str | None:
+    """The lane the judge should be shown: the one the gated score reads, for a skill
+    that opted into `require_configured_signal` — otherwise ``None``.
+
+    🔴 **Opted-in skills only.** Shown a fresh lane signal, the judge moves a lead out of
+    "7 - Too Late" and into the buying window. Under the strict rule that signal is one
+    of the skill's own named buying signals, which is the point. Without it the lane
+    holds whatever dated news enrichment found, so the same move would admit more
+    award-and-earnings leads at 86-92 — the complaint, on the skills this does not fix.
+    """
+    if not _is_gated(tool_context):
+        return None
+    scoring = tool_context["scoring"]
+    window = ((scoring.get("gate") or {}).get("buying_window")) or {}
+    if not requires_configured_signal(window):
+        return None
+    return str(scoring.get("signal_source") or als.DEFAULT_SIGNAL_SOURCE)
+
+
+def show_scoring_signal(scored: list[dict[str, Any]]) -> int:
+    """Make the timing a lead displays the signal its gated score was decided on.
+
+    🔴 **The portal shows ``signal_event`` / ``signal_date`` as the lead's timing**, and
+    those came from the stage judge — which picks its own event, often an old discovery
+    fact. So a lead could score 91 on last week's signal while displaying one from 2024,
+    and the customer read the date, not the score: "many of the prospects' timing
+    signals were back in 2024/2025" (customer email, 2026-10-06).
+
+    Only for a QUALIFIED lead whose selected signal is fresh — i.e. what opened the
+    gate. Any other lead keeps the judge's event, which describes the stage it is shown
+    beside; a fresh event next to "7 - Too Late" would contradict itself. A signal with
+    no description is skipped rather than shown as a bare label. Returns how many leads
+    were changed, for the run log.
+    """
+    changed = 0
+    for item in scored:
+        gated = ((item.get("score_factors") or {}).get("gated")) or {}
+        sig = gated.get("selected_signal")
+        if not (
+            gated.get("lane") == "qualified"
+            and gated.get("selected_from_fresh")
+            and isinstance(sig, dict)
+        ):
+            continue
+        when = str(sig.get("signal_date") or "").strip()
+        what = " ".join(str(sig.get("signal_description") or "").split())
+        if not (when and what):
+            continue
+        item["signal_event"] = what if len(what) <= 200 else what[:199] + "…"
+        item["signal_date"] = when[:200]
+        changed += 1
+    return changed
 
 
 #: True when this run scores with the gated floor-plus-bonus model.
@@ -1074,7 +1132,9 @@ def main() -> int:
             ]
             lane_results = enrich_prospects(
                 lane_targets,
-                lanes=lane_defs,
+                lanes=constrain_signal_lane(
+                    lane_defs, tool_context.get("scoring"), today, log=_log
+                ),
                 provider=provider,
                 provider_config=provider_config,
                 parse_json_array=als.parse_json_array,
@@ -1170,6 +1230,7 @@ def main() -> int:
                 parse_json_array=als.parse_json_array,
                 adjustment_bounds=_adjustment_bounds(tool_context),
                 signal_fields=signal_fields,
+                signal_lane=_gated_signal_lane(tool_context),
                 emit=sink.emit,
             )
             # `judged 0/7` used to be a log line and nothing more — the phase this
@@ -1235,6 +1296,12 @@ def main() -> int:
             for field in ("signal_event", "signal_date"):
                 if judged.get(field):
                     item[field] = judged[field]
+
+        if _is_gated(tool_context):
+            _log(
+                "timing shown from the scoring signal on "
+                f"{show_scoring_signal(scored)}/{len(scored)} scored prospect(s)"
+            )
 
         # ── contacts ──────────────────────────────────────────────────────
         # After scoring, deliberately: contact search is the most expensive call

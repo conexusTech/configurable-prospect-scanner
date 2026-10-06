@@ -58,8 +58,10 @@ Design choices, none forced by the contract:
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Callable, Sequence
 
+from aeo.gated_score import is_future
 from aeo.phases._concurrent import (
     DEFAULT_CALL_TIMEOUT_S,
     PHASE_RETRY_ATTEMPTS,
@@ -237,8 +239,49 @@ def _by_source(prospect: dict[str, Any]) -> dict[str, Any]:
     return by_source if isinstance(by_source, dict) else {}
 
 
+def _lane_signal_lines(
+    prospect: dict[str, Any], signal_lane: str | None, today: date | None = None
+) -> list[str]:
+    """The dated signals the enrichment lane found — the ones the gated score reads.
+
+    🔴 **Without these the judge and the scorer reason about different evidence.** The
+    judge was shown only the discovery row's event, the scorer only the lane's signals,
+    and the portal displays the judge's. Wheelhouse, run of 2026-09-30: 30 of 31
+    qualified leads displayed a different event from the one that scored them —
+    Steelhead Productions scored 91 on a signal from the day before the run while its
+    card said "Named to the 2024 Inc. 5000 list, 2024-08-14".
+    """
+    if not signal_lane:
+        return []
+    validation = prospect.get("validation_data")
+    rows = validation.get(signal_lane) if isinstance(validation, dict) else None
+    out: list[str] = []
+    for row in rows if isinstance(rows, list) else ():
+        if not isinstance(row, dict):
+            continue
+        when = " ".join(str(row.get("signal_date") or "").split())
+        if not any(ch.isdigit() for ch in when):
+            continue
+        if today and is_future(when, today):
+            # The gate refuses a future-dated signal; showing it to the judge would let
+            # it place a stage on an event that has not happened.
+            continue
+        # Whitespace collapsed: this text was fetched from the web, and a newline in it
+        # could forge an `event:` or `id:` line in the block the judge reads.
+        kind = " ".join(str(row.get("signal_type") or "").split()) or "(type not given)"
+        what = " ".join(str(row.get("signal_description") or "").split())[:280]
+        out.append(
+            f"event: {kind} - dated {when} (source: {signal_lane})"
+            + (f": {what}" if what else "")
+        )
+    return out
+
+
 def _prospect_lines(
-    prospects: list[dict[str, Any]], signal_fields: list[str]
+    prospects: list[dict[str, Any]],
+    signal_fields: list[str],
+    signal_lane: str | None = None,
+    today: date | None = None,
 ) -> str:
     """One block per prospect: identity, then every dated event WITH its type.
 
@@ -298,10 +341,22 @@ def _prospect_lines(
                         seen.add(entry)
                         lines.append(entry)
 
+        for entry in _lane_signal_lines(p, signal_lane, today):
+            if entry not in seen:
+                seen.add(entry)
+                lines.append(entry)
+
         if not any(l.startswith("event:") for l in lines):
             lines.append("event: none found - no dated signal for this prospect")
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
+
+
+def _parse_today(today: str) -> date | None:
+    try:
+        return date.fromisoformat(str(today)[:10])
+    except ValueError:
+        return None
 
 
 def _chunk(items: list[Any], size: int) -> list[list[Any]]:
@@ -321,6 +376,7 @@ def judge_prospects(
     request_adjustment: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
     signal_fields: Sequence[str] | None = None,
+    signal_lane: str | None = None,
     emit: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Judge each prospect's stage and fit. Returns `{prospect_id: {...JUDGMENT_FIELDS}}`.
@@ -389,7 +445,9 @@ def judge_prospects(
             adj_max=adj_max,
             fit_section=fit_section,
             adjustment_field=adjustment_field,
-            prospects=_prospect_lines(batch, resolved_signal_fields),
+            prospects=_prospect_lines(
+                batch, resolved_signal_fields, signal_lane, _parse_today(today)
+            ),
         )
         raw = provider(
             prompt,

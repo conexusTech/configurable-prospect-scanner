@@ -577,3 +577,117 @@ class TestRankIsReproducible:
         legacy = [{"company_name": n, "score": 50} for n in ("Zulu", "Alpha", "Mike")]
         assert self._ranked(legacy) == ["Alpha", "Mike", "Zulu"]
         assert self._ranked(legacy[::-1]) == ["Alpha", "Mike", "Zulu"]
+
+
+def _strict(months=18, require=True):
+    """CFG with the buying window's own settings changed, and ONLY there — the top-level
+    `gate.signal_freshness_months` is removed, matching every builder-authored skill."""
+    import copy
+
+    cfg = copy.deepcopy(CFG)
+    del cfg["gate"]["signal_freshness_months"]
+    cfg["gate"]["buying_window"]["signal_freshness_months"] = months
+    if require:
+        cfg["gate"]["buying_window"]["require_configured_signal"] = True
+    return cfg
+
+
+AWARD = {"signal_type": "award recognition", "signal_date": "2026-08-20"}
+FRESH_BENEFITS = {"signal_type": "benefits change", "signal_class": "benefits_change",
+                  "signal_date": "2026-08-10"}
+
+
+class TestOnlyAConfiguredSignalOpensTheGate:
+    """Customer complaint, 2026-10-06: dud prospects ranked in the upper 80s, admitted by
+    awards, earnings and anniversaries — signals the customer never named."""
+
+    def test_an_unconfigured_fresh_signal_qualifies_without_the_option(self):
+        # The control: today's behaviour, so the next test proves the option and not a
+        # fixture that could never qualify.
+        assert run(NC, [AWARD], "1 - Early Discovery", _strict(require=False))["lane"] == "qualified"
+
+    def test_an_unconfigured_fresh_signal_does_not_qualify_with_it(self):
+        out = run(NC, [AWARD], "1 - Early Discovery", _strict())
+        assert out["lane"] == "target_market_only"
+        assert out["total"] <= 45
+
+    def test_a_configured_fresh_signal_still_qualifies(self):
+        out = run(NC, [FRESH_BENEFITS, AWARD], "1 - Early Discovery", _strict())
+        assert out["lane"] == "qualified"
+
+    def test_a_configured_type_matches_without_a_class(self):
+        # The type fallback is what lets a vertical outside the closed enum use this.
+        sig = {"signal_type": "Benefits_Change", "signal_date": "2026-08-10"}
+        assert run(NC, [sig], "1 - Early Discovery", _strict())["lane"] == "qualified"
+
+    def test_the_selected_signal_is_the_one_that_opened_the_gate(self):
+        # The award is fresher; it must not be what the lead's timing describes.
+        out = run(NC, [AWARD, FRESH_BENEFITS], "1 - Early Discovery", _strict())
+        assert out["selected_signal"]["signal_type"] == "benefits change"
+        assert out["selected_from_fresh"] is True
+
+    def test_a_stale_configured_signal_does_not_qualify(self):
+        old = dict(FRESH_BENEFITS, signal_date="2025-12-01")  # 8 months before TODAY
+        assert run(NC, [old], "1 - Early Discovery", _strict(months=6))["lane"] != "qualified"
+        # control: the same signal inside a longer window
+        assert run(NC, [old], "1 - Early Discovery", _strict(months=18))["lane"] == "qualified"
+
+
+class TestSelectionUsesTheGatesOwnWindow:
+    def test_selection_ignores_a_signal_older_than_the_window_the_gate_used(self):
+        # Strong but 10 months old, weak but fresh. Window 6: the gate admits on the weak
+        # one, so the strong one must not be what the lead reports.
+        strong_old = {"signal_type": "rfp", "signal_class": "rfp_active", "signal_date": "2025-10-15"}
+        weak_fresh = {"signal_type": "x", "signal_class": "leadership_change", "signal_date": "2026-08-01"}
+        out = run(NC, [strong_old, weak_fresh], "1 - Early Discovery", _strict(months=6, require=False))
+        assert out["lane"] == "qualified"
+        assert out["selected_signal"] is weak_fresh
+        assert out["selected_from_fresh"] is True
+
+
+class TestTheStrictGateThroughTheScannersOwnPath:
+    """Review finding, 2026-10-06: the tests above call `score()` directly, skipping the
+    `classify` step the scanner applies — so an award that `classify` turns into
+    `corporate_event` qualified in the real path while every test was green."""
+
+    @staticmethod
+    def _via_scanner(signals, require):
+        cfg = _strict(require=require)
+        cfg["signal_source"] = "switching_signal"
+        prospect = {"validation_data": {"switching_signal": signals}}
+        total, bd = als._gated_total(NC, prospect, {"pipeline_status": "1 - Early Discovery"},
+                                     cfg, 100, TODAY)
+        return bd
+
+    @pytest.mark.parametrize("kind", ["award recognition", "Q2 financial results",
+                                      "Strategic partnership", "Revenue growth"])
+    def test_a_keyword_class_does_not_open_the_strict_gate(self, kind):
+        # CFG's classes are the canonical keys, so `corporate_event` and
+        # `workforce_change` are listed — exactly the case the review reproduced.
+        sig = {"signal_type": kind, "signal_date": "2026-08-20"}
+        assert self._via_scanner([sig], require=True)["lane"] != "qualified"
+
+    def test_control_the_same_signal_qualifies_without_the_rule(self):
+        sig = {"signal_type": "award recognition", "signal_date": "2026-08-20"}
+        assert self._via_scanner([sig], require=False)["lane"] == "qualified"
+
+    def test_an_exact_label_still_qualifies_through_the_scanner(self):
+        sig = {"signal_type": "benefits_change", "signal_date": "2026-08-20"}
+        bd = self._via_scanner([sig], require=True)
+        assert bd["lane"] == "qualified"
+        assert bd["bands"]["signal_strength"] == 5
+
+    def test_a_string_false_does_not_switch_the_rule_on(self):
+        cfg = _strict(require=False)
+        cfg["gate"]["buying_window"]["require_configured_signal"] = "false"
+        assert run(NC, [AWARD], "1 - Early Discovery", cfg)["lane"] == "qualified"
+
+
+class TestSelectionRanksCustomLabelsByTheirWeight:
+    def test_the_strongest_configured_label_is_selected_not_the_freshest(self):
+        # Before: ranked on the class alone, so a custom label rated -1 and the fresher,
+        # weaker signal won — signal_strength 1 instead of 8.
+        classes = {"new_rfp_posting": 8, "leadership_change": 1}
+        strong = {"signal_type": "new_rfp_posting", "signal_date": "2026-06-01"}
+        weak = {"signal_type": "x", "signal_class": "leadership_change", "signal_date": "2026-08-20"}
+        assert select_signal([weak, strong], classes, 18, TODAY) is strong

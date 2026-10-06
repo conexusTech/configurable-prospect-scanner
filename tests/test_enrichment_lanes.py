@@ -422,3 +422,78 @@ class TestFusionActuallyReducesCalls:
             assert by_id[f"p{i}"] == [
                 {"incumbent_type": f"Co {i}", "provider_name": ""}
             ]
+
+
+class TestTheGatesLaneIsToldWhatABuyingSignalIs:
+    """A strict gate over a free-text collector refuses everything (Matrix Frame,
+    2026-09-08: 0 of 19 qualified leads carried a configured type). The collector must be
+    given the gate's vocabulary and window."""
+
+    from datetime import date as _date
+
+    LANES = [
+        {"key": "buying_signal", "objective": "find signals",
+         "fields": ["signal_type", "signal_date", "signal_description", "source_url"]},
+        {"key": "project_scope", "objective": "scope", "fields": ["notes"]},
+    ]
+
+    def _scoring(self, require=True, months=6):
+        return {
+            "signal_source": "buying_signal",
+            "gate": {"buying_window": {"signal_freshness_months": months,
+                                       **({"require_configured_signal": True} if require else {})}},
+            "bonus": {"signal_strength": {
+                "classes": {"equipment_expansion": 6, "new_facility": 5},
+                "definitions": {"equipment_expansion": "bought or installed wide-format equipment"},
+            }},
+        }
+
+    def test_untouched_without_the_option(self):
+        from aeo.phases.enrichment import constrain_signal_lane
+
+        out = constrain_signal_lane(self.LANES, self._scoring(require=False), self._date(2026, 10, 6))
+        assert out is self.LANES
+
+    def test_only_the_gates_lane_is_narrowed_and_the_config_is_not_mutated(self):
+        from aeo.phases.enrichment import constrain_signal_lane
+
+        out = constrain_signal_lane(self.LANES, self._scoring(), self._date(2026, 10, 6))
+        assert out[0]["allowed_signal_types"] == {
+            "equipment_expansion": "bought or installed wide-format equipment",
+            "new_facility": "",
+        }
+        assert out[0]["signal_since"] == "2026-04-07"  # the gate's own boundary: age < 6
+        assert "allowed_signal_types" not in out[1]
+        assert "allowed_signal_types" not in self.LANES[0]
+
+    def test_the_window_crosses_a_year_boundary(self):
+        from aeo.phases.enrichment import constrain_signal_lane
+
+        out = constrain_signal_lane(self.LANES, self._scoring(months=6), self._date(2026, 3, 31))
+        assert out[0]["signal_since"] == "2025-10-01"
+
+    def test_the_prompt_carries_the_labels_the_date_and_the_exclusions(self):
+        from aeo.phases.enrichment import _group_briefs, constrain_signal_lane
+
+        brief = _group_briefs(constrain_signal_lane(self.LANES, self._scoring(), self._date(2026, 10, 6)))
+        assert '"equipment_expansion": bought or installed wide-format equipment' in brief
+        assert '- "new_facility"' in brief
+        assert "on or after 2026-04-07" in brief
+        assert "awards" in brief
+        # and only once — the scope lane gets no such rule
+        assert brief.count("BUYING SIGNALS ONLY") == 1
+
+
+def test_the_prompts_start_date_is_exactly_the_gates_boundary():
+    from datetime import date, timedelta
+
+    from aeo.gated_score import fresh_signals
+    from aeo.phases.enrichment import earliest_admitted
+
+    for today in (date(2026, 10, 6), date(2026, 3, 31), date(2026, 1, 1), date(2024, 2, 29)):
+        for months in (1, 6, 12, 18):
+            since = earliest_admitted(months, today)
+            on = {"signal_date": since.isoformat()}
+            before = {"signal_date": (since - timedelta(days=1)).isoformat()}
+            assert fresh_signals([on], months, today) == [on], (today, months)
+            assert fresh_signals([before], months, today) == [], (today, months)

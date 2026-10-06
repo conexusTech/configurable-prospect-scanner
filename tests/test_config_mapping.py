@@ -144,7 +144,44 @@ class TestMapping:
     def test_falls_back_to_org_products_when_config_has_none(self):
         ctx = _context(product_description=None)
         ctx["products_services"] = [{"description": "from onboarding"}]
-        assert build_tool_context(ctx)["product_description"] == "from onboarding"
+        assert build_tool_context(ctx)["product_description"] == "- from onboarding"
+
+    @pytest.mark.parametrize("vertical", ["target", "Healthcare", "Consulting"])
+    def test_the_builders_placeholder_yields_to_org_products(self, vertical):
+        # Every builder-created skill carried this text on 2026-10-06, and the stage
+        # judge reasoned about buyers' "need for prospect-scanning tools" as a result.
+        ctx = _context(
+            product_description=f"Prospect-scanning skill for the {vertical} vertical."
+        )
+        ctx["products_services"] = [
+            {"name": "Frames", "description": "<p>Metal frames&nbsp;for <b>signage</b></p>"},
+            {"name": "Lightboxes", "description": ""},
+        ]
+        assert build_tool_context(ctx)["product_description"] == (
+            "- Frames: Metal frames for signage\n- Lightboxes"
+        )
+
+    def test_text_resembling_the_placeholder_is_not_mistaken_for_it(self):
+        ctx = _context(
+            product_description="Prospect-scanning skill for the target vertical, plus AV."
+        )
+        ctx["products_services"] = [{"description": "from onboarding"}]
+        assert build_tool_context(ctx)["product_description"].endswith("plus AV.")
+
+    @pytest.mark.parametrize("products", [None, [], {"products": []}, [{"name": " ", "description": "<p></p>"}]])
+    def test_the_placeholder_is_kept_when_the_org_has_no_products(self, products):
+        # Review finding: discarding it with nothing to replace it failed the whole run,
+        # for every such skill, the moment the image deployed.
+        ctx = _context(product_description="Prospect-scanning skill for the target vertical.")
+        ctx["products_services"] = products
+        assert build_tool_context(ctx)["product_description"] == (
+            "Prospect-scanning skill for the target vertical."
+        )
+
+    def test_the_wrapped_products_shape_is_read(self):
+        ctx = _context(product_description=None)
+        ctx["products_services"] = {"products": [{"name": "Track days"}]}
+        assert build_tool_context(ctx)["product_description"] == "- Track days"
 
     def test_provider_config_is_deployment_not_authoring(self):
         # Model choice must not be settable from a chat-authored config: it is an

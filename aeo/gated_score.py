@@ -195,13 +195,73 @@ def fresh_signals(
     return out
 
 
+def freshness_months(gate_cfg: dict[str, Any]) -> int:
+    """The ONE freshness window, from the top-level ``scoring.gate`` config.
+
+    🔴 **Read in three places, and they disagreed.** The gate read
+    ``gate.buying_window.signal_freshness_months``; selection read
+    ``gate.signal_freshness_months``; every builder-authored skill sets only the former.
+    So selection and ``selected_from_fresh`` used 18 months whatever the gate admitted
+    on — invisible while every config said 18. The window's own key wins, the top-level
+    one is the fallback, 18 the default; the gate, selection and the enrichment prompt
+    all resolve it here.
+    """
+    window = gate_cfg.get("buying_window") or {}
+    return int(
+        window.get("signal_freshness_months")
+        or gate_cfg.get("signal_freshness_months")
+        or 18
+    )
+
+
+def requires_configured_signal(window_cfg: dict[str, Any]) -> bool:
+    """Whether a skill opted into `admissible_signals`' strict rule. A JSON ``true``
+    only — a string ``"false"`` must not switch it on."""
+    return window_cfg.get("require_configured_signal") is True
+
+
+def admissible_signals(
+    signals: Sequence[dict[str, Any]],
+    gate_cfg: dict[str, Any],
+    strength_cfg: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """The signals allowed to open the gate, before freshness is considered.
+
+    Every signal, unless the skill sets ``require_configured_signal`` — then only a
+    signal the skill's own ``signal_strength.classes`` names.
+
+    🔴 **Why the option exists: "any dated news" is not a buying signal.** Measured on the
+    two gated books of 2026-09 (Wheelhouse, Matrix Frame), with the gate admitting any
+    fresh signal: earnings reports, HR awards, a G2 ranking, a 30th anniversary and a sign
+    shop's own portfolio posts all opened it, and every admitted lead landed at 86-92 —
+    so 23 of Wheelhouse's 31 qualified leads, and all 19 of Matrix's, were qualified by
+    something the customer never listed as a reason to buy. The customer's complaint was
+    "dud prospects ranked in the upper 80s".
+
+    🔴 **Matched on the signal's own label, exactly — never on a derived class.** The
+    scanner attaches ``signal_class = classify(signal_type)``, a keyword match into a
+    closed seven-value enum: "award recognition" and "Q2 financial results" both become
+    ``corporate_event``, "revenue growth" becomes ``workforce_change``. A skill whose
+    classes use those keys would admit exactly what this rule exists to refuse. Under the
+    rule the enrichment lane is told to write one of the configured labels, so the label
+    is the evidence and the class is only a guess about it.
+
+    Opt-in, because one image serves every skill and a skill whose signal vocabulary is
+    not yet authored would lose every qualified lead at once.
+    """
+    if not requires_configured_signal(gate_cfg):
+        return list(signals)
+    return [s for s in signals if label_weight(s, strength_cfg) is not None]
+
+
 def in_buying_window(
     stage: Any,
     signals: Sequence[dict[str, Any]],
     gate_cfg: dict[str, Any],
     today: date,
+    strength_cfg: Optional[dict[str, Any]] = None,
 ) -> bool:
-    """G2 — an active stage AND **any** signal inside the freshness window.
+    """G2 — an active stage AND **any** admissible signal inside the freshness window.
 
     🔴 **``any_fresh``, never "the strongest is fresh".** Letting the selection rule decide
     admission was the mirror-image bug: a 31-month-old RFP beside a one-week-old broker
@@ -211,8 +271,9 @@ def in_buying_window(
     window = {_norm(s) for s in (gate_cfg.get("window_stages") or [])}
     if not window or _norm(stage) not in window:
         return False
-    months = int(gate_cfg.get("signal_freshness_months") or 18)
-    return bool(fresh_signals(signals, months, today))
+    months = freshness_months({"buying_window": gate_cfg})
+    pool = admissible_signals(signals, gate_cfg, strength_cfg or {})
+    return bool(fresh_signals(pool, months, today))
 
 
 # ─────────────────────────── selection ───────────────────────────
@@ -234,8 +295,14 @@ def select_signal(
         return None
     pool = fresh_signals(signals, months, today) or list(signals)
 
+    # Ranked by the SAME weight the band pays, label first. Ranking on the class alone
+    # rated every custom label -1, so under a skill's own vocabulary the freshest signal
+    # won rather than the strongest. Unclamped: this orders, it does not score.
+    weights = {"classes": classes, "max": 10**9}
+
     def rank(s: dict[str, Any]) -> tuple[int, int]:
-        strength = classes.get(str(s.get("signal_class") or ""), -1)
+        w = configured_weight(s, weights)
+        strength = -1 if w is None else w
         age = age_months(s.get("signal_date"), today)
         return (strength, -(age if age is not None else 10**6))
 
@@ -243,6 +310,52 @@ def select_signal(
 
 
 # ─────────────────────────── bonus bands ───────────────────────────
+
+def _label_key(v: Any) -> str:
+    # Normalised on both sides, for the same reason `signal_class.normalize` exists: the
+    # model writes `groundbreaking announcement` and a config declares
+    # `groundbreaking_announcement`, and an underscore should not decide a score.
+    return _norm(v).replace(" ", "_")
+
+
+def label_weight(sig: Optional[dict[str, Any]], cfg: dict[str, Any]) -> Optional[int]:
+    """The weight the config names for this signal's own ``signal_type``, or ``None``."""
+    if not sig:
+        return None
+    raw = _label_key(sig.get("signal_type"))
+    # 🔑 Bail BEFORE the scan, not inside it. An empty type has nothing to match, and a
+    # config key that normalised to empty (`""`, `"---"`) would otherwise match it and
+    # hand a weight to a signal carrying no type at all.
+    if not raw:
+        return None
+    top = int(cfg.get("max", 8))
+    for key, weight in (cfg.get("classes") or {}).items():
+        if _label_key(key) == raw:
+            return max(0, min(top, int(weight)))
+    return None
+
+
+def configured_weight(sig: Optional[dict[str, Any]], cfg: dict[str, Any]) -> Optional[int]:
+    """The weight the skill's ``signal_strength`` config names for this signal, or
+    ``None`` when it names none.
+
+    The class first, then the signal's own label — the order every existing config was
+    tuned under (`test_the_canonical_class_still_wins_over_the_type`). Under
+    ``require_configured_signal`` the class is removed before this is reached, so only
+    the label counts there; see `score`.
+    """
+    if not sig:
+        return None
+    classes: dict[str, int] = cfg.get("classes") or {}
+    top = int(cfg.get("max", 8))
+    cls = str(sig.get("signal_class") or "")
+    # `cls` is "" for every row written before `signal_class` was attached at enrichment
+    # (2026-08-31), so an empty key in a config would silently match all of them and pay
+    # its weight to signals that were never classified at all. Require a real class.
+    if cls and cls in classes:
+        return max(0, min(top, int(classes[cls])))
+    return label_weight(sig, cfg)
+
 
 def band_signal_strength(sig: Optional[dict[str, Any]], cfg: dict[str, Any]) -> int:
     """0-8 from the canonical class, falling back to the signal's own type.
@@ -272,32 +385,10 @@ def band_signal_strength(sig: Optional[dict[str, Any]], cfg: dict[str, Any]) -> 
     is still tried first, so every existing config keeps its exact behaviour; this can
     only turn a midpoint into a weight the config explicitly asked for.
     """
-    classes: dict[str, int] = cfg.get("classes") or {}
-    top = int(cfg.get("max", 8))
     if not sig:
         return 0  # no signal at all is a real absence, not an unusable class
-    cls = str(sig.get("signal_class") or "")
-    # `cls` is "" for every row written before `signal_class` was attached at enrichment
-    # (2026-08-31), so an empty key in a config would silently match all of them and pay
-    # its weight to signals that were never classified at all. Require a real class.
-    if cls and cls in classes:
-        return max(0, min(top, int(classes[cls])))
-    # Normalised on both sides, for the same reason `signal_class.normalize` exists: the
-    # model writes `groundbreaking announcement` and a config declares
-    # `groundbreaking_announcement`, and an underscore should not decide a score.
-    def _key(v: Any) -> str:
-        return _norm(v).replace(" ", "_")
-
-    raw = _key(sig.get("signal_type"))
-    # 🔑 Bail BEFORE the scan, not inside it. An empty type has nothing to match, and a
-    # config key that normalised to empty (`""`, `"---"`) would otherwise match it and
-    # hand a weight to a signal carrying no type at all.
-    if not raw:
-        return top // 2
-    for key, weight in classes.items():
-        if _key(key) == raw:
-            return max(0, min(top, int(weight)))
-    return top // 2
+    weight = configured_weight(sig, cfg)
+    return int(cfg.get("max", 8)) // 2 if weight is None else weight
 
 
 def band_company_size(lead: dict[str, Any], cfg: dict[str, Any]) -> int:
@@ -375,13 +466,30 @@ def score(
     # quiet points at scoring time. Reported by AGENT for a different reason — the
     # array left one description carrying all four bands' semantics, 3.6x over the
     # renderer budget, and the sentence it truncated away was the midpoint rule.
-    months = int(gate_cfg.get("signal_freshness_months") or 18)
-
-    g1 = in_target_market(lead, gate_cfg.get("target_market") or {}, aliases)
-    g2 = in_buying_window(stage, signals, gate_cfg.get("buying_window") or {}, today)
-
+    months = freshness_months(gate_cfg)
+    # The window's months resolved ONCE and handed down, so the gate cannot read a
+    # different window from selection — see `freshness_months`.
+    window_cfg = {
+        **(gate_cfg.get("buying_window") or {}),
+        "signal_freshness_months": months,
+    }
     strength_cfg = bonus_cfg.get("signal_strength") or {}
-    sig = select_signal(signals, strength_cfg.get("classes") or {}, months, today)
+    g1 = in_target_market(lead, gate_cfg.get("target_market") or {}, aliases)
+    g2 = in_buying_window(stage, signals, window_cfg, today, strength_cfg)
+
+    # Under `require_configured_signal` the selected signal must be one that could have
+    # opened the gate, or the prose and the timing shown would describe a signal the gate
+    # refused. Falls back to every signal only when none is admissible, so a gated-out
+    # lead still describes its best evidence.
+    admissible = admissible_signals(signals, window_cfg, strength_cfg)
+    if requires_configured_signal(window_cfg):
+        # The derived class is a keyword guess the strict rule refuses to admit on, so it
+        # must not weigh or rank either: "award recognition" is `corporate_event` to
+        # `classify`, and a config listing that key would pay it. Label only.
+        admissible = [{**x, "signal_class": None} for x in admissible]
+    sig = select_signal(
+        admissible or signals, strength_cfg.get("classes") or {}, months, today
+    )
 
     parts = {
         "signal_strength": band_signal_strength(sig, strength_cfg),
@@ -418,5 +526,7 @@ def score(
         # no fresh signal" from "the selector had nothing to choose between", and the
         # nurture-lane inversion (a weak fresh signal scoring below a stale strong one)
         # is an ACCEPTED consequence that only reads as acceptable when it is visible.
-        "selected_from_fresh": bool(sig and sig in fresh_signals(signals, months, today)),
+        "selected_from_fresh": bool(
+            sig and sig in fresh_signals(admissible, months, today)
+        ),
     }
