@@ -57,3 +57,35 @@ Build the context for a skill whose description starts like the placeholder but 
 **Expect**
 
 That description, unchanged.
+
+---
+
+### Check: seller-org-description-fallback
+
+**Requirement:** An org with no products is described by its own company description
+**Surface:** Scan context
+**Automated:** `tests/test_config_mapping.py::TestMapping::test_with_no_products_the_orgs_own_description_is_used`
+
+**Do**
+
+Build the context for a placeholder skill whose org has no products (absent, empty, or one blank product) and a description with tags, an entity and a non-breaking space.
+
+**Expect**
+
+`Lee Company is a family-owned mechanical contractor.` in every case.
+
+---
+
+### Check: seller-products-beat-description
+
+**Requirement:** An org with no products is described by its own company description
+**Surface:** Scan context
+**Automated:** `tests/test_config_mapping.py::TestMapping::test_products_still_win_over_the_orgs_description`
+
+**Do**
+
+Build the context for a placeholder skill whose org has one product and a description.
+
+**Expect**
+
+`- Frames`.

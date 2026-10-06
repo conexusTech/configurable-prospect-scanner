@@ -168,6 +168,25 @@ class TestMapping:
         ctx["products_services"] = [{"description": "from onboarding"}]
         assert build_tool_context(ctx)["product_description"].endswith("plus AV.")
 
+    @pytest.mark.parametrize("products", [None, [], [{"name": "", "description": "<p>&nbsp;</p>"}]])
+    def test_with_no_products_the_orgs_own_description_is_used(self, products):
+        # Lee Company and Resource Floor Care: no products, a real paragraph each.
+        ctx = _context(product_description="Prospect-scanning skill for the target vertical.")
+        ctx["products_services"] = products
+        ctx["organization"]["description"] = (
+            "<p><strong>Lee Company</strong> is a family-owned mechanical&nbsp;contractor.</p>"
+        )
+        # Tags stripped, entities decoded, and the non-breaking space collapsed.
+        assert build_tool_context(ctx)["product_description"] == (
+            "Lee Company is a family-owned mechanical contractor."
+        )
+
+    def test_products_still_win_over_the_orgs_description(self):
+        ctx = _context(product_description="Prospect-scanning skill for the target vertical.")
+        ctx["products_services"] = [{"name": "Frames"}]
+        ctx["organization"]["description"] = "<p>About us</p>"
+        assert build_tool_context(ctx)["product_description"] == "- Frames"
+
     @pytest.mark.parametrize("products", [None, [], {"products": []}, [{"name": " ", "description": "<p></p>"}]])
     def test_the_placeholder_is_kept_when_the_org_has_no_products(self, products):
         # Review finding: discarding it with nothing to replace it failed the whole run,

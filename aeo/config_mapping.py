@@ -277,6 +277,12 @@ def _is_builder_placeholder(text: Any) -> bool:
     return bool(_BUILDER_PLACEHOLDER.match(" ".join(str(text or "").split())))
 
 
+def _plain_text(raw: Any) -> str | None:
+    """Rich-text HTML from onboarding as one line of plain text, bounded."""
+    text = " ".join(html.unescape(_TAGS.sub(" ", str(raw or ""))).split())
+    return text[:_PRODUCTS_MAX_CHARS] or None
+
+
 def _products_description(products: Any) -> str | None:
     """Every product the org sells, one per line, as plain text.
 
@@ -294,9 +300,7 @@ def _products_description(products: Any) -> str | None:
         if not isinstance(item, dict):
             continue
         name = " ".join(str(item.get("name") or "").split())
-        desc = " ".join(
-            html.unescape(_TAGS.sub(" ", str(item.get("description") or ""))).split()
-        )
+        desc = _plain_text(item.get("description")) or ""
         line = f"{name}: {desc}" if name and desc else name or desc
         if line:
             lines.append(f"- {line}")
@@ -350,11 +354,16 @@ def build_tool_context(
     # but the placeholder yields to what the org actually sells.
     authored = config.get("product_description")
     product_description = (
-        None if _is_builder_placeholder(authored) else authored
-    ) or _products_description(context.get("products_services"))
-    # An org with no usable products keeps the placeholder rather than failing the run:
-    # a vague description was the state of every run before this change, and refusing
-    # would stop every such skill the moment the image deploys.
+        (None if _is_builder_placeholder(authored) else authored)
+        or _products_description(context.get("products_services"))
+        # An org with no products still says what it does in its own description —
+        # Lee Company and Resource Floor Care, both live, have no products and a real
+        # paragraph each, and were otherwise told they sell prospect-scanning software.
+        or _plain_text(org.get("description"))
+    )
+    # Nothing at all: keep the placeholder rather than failing the run — a vague
+    # description is what every such run had before, and refusing would stop every
+    # such skill the moment the image deploys.
     product_description = product_description or authored
     if not product_description:
         problems.append(

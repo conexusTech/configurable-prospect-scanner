@@ -36,3 +36,13 @@ Related: [config mapping](/lib/config-mapping.md) · [buying-signal qualificatio
 - THEN that text is used, not the org's products
 
 **Checked by:** seller-authored-wins, seller-lookalike-not-placeholder
+
+#### Scenario: An org with no products is described by its own company description
+
+- GIVEN a skill carrying the builder's placeholder
+- AND an org with no usable products but a company description written as rich text
+- WHEN the scan context is built
+- THEN the product description is that company description as plain text
+- AND an org that has products is still described by its products
+
+**Checked by:** seller-org-description-fallback, seller-products-beat-description
