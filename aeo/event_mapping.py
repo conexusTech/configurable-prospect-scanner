@@ -53,6 +53,12 @@ SCORED_PASSTHROUGH = (
     "contact_phone",
     "contact_linkedin",
     "contacts_data",
+    # Added 2026-11-18 (`scanner-finds-up-to-three-contacts`, PRD R-27.a): every person
+    # the contact search found, at most three `{name, title, email, phone, linkedin,
+    # source_url, confidence}`; the five columns above are the first of them. Named here
+    # in the same change that produces it, so it is not this tuple's sixth omission.
+    # A gateway that predates it ignores it (the callback validates with no options).
+    "contacts",
     "score",
     "rank",
     "score_factors",
@@ -194,6 +200,12 @@ def map_scored_event(event: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         out = {k: item[k] for k in SCORED_PASSTHROUGH if item.get(k) is not None}
+
+        # 🔴 An empty `contacts` is never sent. On the wire it would read as "this
+        # business has nobody" and erase the people an earlier run found; a search that
+        # found nobody says so by sending no list at all.
+        if not out.get("contacts"):
+            out.pop("contacts", None)
 
         # A location rides the wire ONLY when the geography step verified it. The marker
         # itself is internal and is never emitted: `forbidNonWhitelisted` would 400 the

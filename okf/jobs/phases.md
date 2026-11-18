@@ -19,11 +19,26 @@ In order:
 | Enrichment lanes | additional authored fact passes, each differently shaped, stored per lane |
 | AI stage judgment | the sales-pipeline stage and its reasoning, replacing the engine's date-only ladder |
 | Scoring | the ranked, scored list — [lib/scoring](/lib/scoring.md) |
-| Contacts | decision-maker details merged onto the top-ranked prospects |
+| Contacts | up to three named decision-makers per top-ranked prospect, best match first; the first fills its contact fields — [capabilities/contact-search](/capabilities/contact-search.md) |
 
 ⚠️ **`README.md` states that validation and contacts do not run. That is false** — both
 are implemented and executed. See [log.md](/log.md); the claim survives in three documents
 and one dead import.
+
+## Contacts: up to three people, none invented
+
+The contact search asks for up to three named decision-makers per business (a skill's contact
+settings may ask for one or two instead; three is the most the gateway keeps), six businesses to
+a grounded call as before. Every rule the single-contact search had holds for each person: no
+placeholder names, and no address that fails to parse or reads as a naming template such as
+`first.last@…` — a refused address is kept only as evidence. A field longer than its limit is left
+out, never shortened, because one over-long field makes the gateway refuse the whole scored event;
+a value that is not text is treated as absent. When nobody can be named, a general office email,
+phone or role still fills the contact fields, as the single-contact search allowed, but is never
+listed as a person. A person with no real name is not
+listed, and the same person twice is listed once. A business where nobody was found sends no
+list at all, never an empty one, so a later run cannot erase people an earlier one found. An
+answer in the older single-contact shape is still read, as one person, under the same rules.
 
 ## Geography is enforced, not requested
 

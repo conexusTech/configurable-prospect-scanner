@@ -1,5 +1,26 @@
 # OKF Log
 
+## 2026-11-18
+
+- **Update** — `scanner-finds-up-to-three-contacts` (Phase CRM-2, PRD R-27.a; branch
+  `feature/CONE-0016-99-scanner-finds-up-to-three-contacts`, not committed, not released). The
+  contact search now asks for up to three named decision-makers per business (`contacts.max_people`,
+  default 3, held to 1-3), best match first, still six businesses per grounded call. The scored item
+  keeps its five `contact_*` fields, filled from the first person, and gains `contacts` — the list,
+  snake_case on the wire like every other scored key. Every person passes the old rules, plus one
+  new one: an address whose local part is a naming template (`first.last@…`) is refused like an
+  unparseable one, kept only in `contacts_data.rejected_emails` (`rejected_email` still holds the
+  first person's). A field over its limit (name and title 200, email 254, phone 50, LinkedIn and
+  source 500, confidence 10) is left out, never shortened — one over-long column refuses the whole
+  scored event. An over-long name drops the person, and a value that is not text is absent. A
+  role-only entry (office email or phone, no name) still fills the columns but is never listed. A
+  single-contact answer is held to the same rules, so it differs from before in two ways: template
+  emails are refused, and `rejected_emails` is added. An empty or failed search sends no `contacts`
+  key, and the scored mapping drops an empty list wherever it came from. Output per batch of six grows about threefold (~0.5k to ~1.5k tokens typical, ~2.7k long) against the Claude
+  provider's 8192-token cap; the Gemini provider sets none. Release is an image build and a catalog
+  re-pin, after the gateway's `prospects-hold-several-contacts`, and re-engines every builder-created
+  skill at once. Capability `contact-search`.
+
 ## 2026-10-01
 
 - **Update** — **Shipped to production 2026-10-01**: image `b5bbca0` (`sha256:8a19633c…`,

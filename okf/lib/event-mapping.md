@@ -17,7 +17,7 @@ gateway. There is no other write path.
 | Zip codes | the validated ZIP rows per market, with how each was discovered |
 | Prospects | the discovered companies, each stamped with the phase that produced it |
 | Validations | the per-prospect verdict, plus any enrichment lanes, in an open field |
-| Scored | the ranked result: score, rank, factors, contact details, AI analysis and adjustment, signal and its date, disqualification, explanation, and priority band |
+| Scored | the ranked result: score, rank, factors, contact details and the list of up to three people found, AI analysis and adjustment, signal and its date, disqualification, explanation, and priority band |
 | Completed | the run summary — counts and cost |
 | Error | a message |
 
@@ -44,6 +44,19 @@ object and calls `validate(instance)` with no options (`runtime-scan-events.cont
 undeclared field is **ignored**, not a 400. The risk is quieter: an older gateway drops the
 location while this scanner has already **scored** the lead on it, so that run stores a score and
 a location that disagree, and nothing ever re-sends it. Both shipped 2026-10-01 in that order.
+
+**The people found travel as a list beside the one contact.** A scored lead carries its contact
+in the five single-contact fields as it always has, filled from the first person found, and —
+since `scanner-finds-up-to-three-contacts` — a `contacts` list of up to three people, each with
+whichever of `name`, `title`, `email`, `phone`, `linkedin`, `source_url` and `confidence` was
+found. The keys are snake_case like every other key on this event, which the scanner sends
+verbatim. **An empty list is never sent**: on the wire it would mean "this business has nobody"
+and erase people found before, so a search that found nobody sends no list at all. See
+[capabilities/contact-search](/capabilities/contact-search.md).
+
+⚠️ **Deploy order: the gateway's `prospects-hold-several-contacts` before this scanner.** A
+gateway that predates it ignores the list (the same no-options validation as above), so the scored
+callback still lands with its one contact — the extra people are simply lost for that run.
 
 Prospect and scored events pass a fixed field list through rather than forwarding whatever
 the engine produced, so an engine change cannot silently widen what this scanner sends.
