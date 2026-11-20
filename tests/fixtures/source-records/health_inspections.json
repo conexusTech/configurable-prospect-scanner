@@ -1,0 +1,212 @@
+{
+  "_comment": "The gateway's answer to GET /runtime/organizations/:orgId/source-records?skill=<slug>&source=<name> (Basic auth), as the scanner reads it. Shared with aeo-backend's scan-sources-read-gateway-feeds, whose contract (src/backend/findings/__fixtures__/health-inspection-feed-rows.json) carries these same items; ignore this _comment key. At most 500 items (the scanner refuses more); one item per establishment (permit_id), from its newest matching report. Names: every row's establishment_name is '<name>, <street>' (the address's first line; else the city; else the plain name alone) and establishment_name_plain the plain name, whether or not the name is shared, so a restaurant keeps one name in every answer whatever else the gateway's records hold. Two names can still meet after the scanner's own normalisation only when name and street both do; the scanner then keeps the newest establishment and warns, as a safety net. Every row carries source_name 'Virginia health inspection report', and signal_description is the bare sentence the gateway's sentence rule cuts, with no 'Comment: ' prefix. signal_date is an ISO YYYY-MM-DD string (the scanner reads anything else as oldest). state is normalised (or taken from the district); city, zip_code and location_address may be empty. Addresses, names and URLs are invented.",
+  "feed": "health_inspections",
+  "terms": [
+    "gasket"
+  ],
+  "since": "2026-10-20",
+  "total": 10,
+  "truncated": false,
+  "items": [
+    {
+      "establishment_name": "Bella's Bistro, 100 E Cary St",
+      "establishment_name_plain": "Bella's Bistro",
+      "location_address": "100 E Cary St, Richmond, VA 23220",
+      "city": "Richmond",
+      "state": "VA",
+      "zip_code": "23220",
+      "industry": "Restaurant",
+      "signal_type": "health_inspection_violation",
+      "signal_date": "2026-11-04",
+      "source_url": "https://inspections.example.gov/va-richmond-city/report/IR-1001",
+      "signal_description": "Walk-in cooler door gasket torn and not maintained in good repair.",
+      "matched_terms": [
+        "gasket"
+      ],
+      "inspection_id": "IR-1001",
+      "permit_id": "PR-2001",
+      "district": "va-richmond-city",
+      "source_name": "Virginia health inspection report"
+    },
+    {
+      "establishment_name": "Subway, 123 W Broad St",
+      "establishment_name_plain": "Subway",
+      "location_address": "123 W Broad St, Richmond, VA 23220",
+      "city": "Richmond",
+      "state": "VA",
+      "zip_code": "23220",
+      "industry": "Fast Food",
+      "signal_type": "health_inspection_violation",
+      "signal_date": "2026-11-06",
+      "source_url": "https://inspections.example.gov/va-richmond-city/report/IR-1002",
+      "signal_description": "Reach-in refrigerator gasket split",
+      "matched_terms": [
+        "gasket"
+      ],
+      "inspection_id": "IR-1002",
+      "permit_id": "PR-2002",
+      "district": "va-richmond-city",
+      "source_name": "Virginia health inspection report"
+    },
+    {
+      "establishment_name": "Subway, 4500 Forest Hill Ave",
+      "establishment_name_plain": "Subway",
+      "location_address": "4500 Forest Hill Ave, Richmond, VA 23225",
+      "city": "Richmond",
+      "state": "VA",
+      "zip_code": "23225",
+      "industry": "Fast Food",
+      "signal_type": "health_inspection_comment",
+      "signal_date": "2026-10-28",
+      "source_url": "https://inspections.example.gov/va-richmond-city/report/IR-1003",
+      "signal_description": "monitor the prep cooler gasket, showing wear.",
+      "matched_terms": [
+        "gasket"
+      ],
+      "inspection_id": "IR-1003",
+      "permit_id": "PR-2003",
+      "district": "va-richmond-city",
+      "source_name": "Virginia health inspection report"
+    },
+    {
+      "establishment_name": "Mechanicsville Pho, 8100 Mechanicsville Tpke",
+      "establishment_name_plain": "Mechanicsville Pho",
+      "location_address": "8100 Mechanicsville Tpke, Mechanicsville, VA 23111",
+      "city": "Mechanicsville",
+      "state": "VA",
+      "zip_code": "23111",
+      "industry": "Restaurant",
+      "signal_type": "health_inspection_violation",
+      "signal_date": "2026-11-02",
+      "source_url": "https://inspections.example.gov/va-chickahominy/report/IR-1004",
+      "signal_description": "Gaskets on the two-door freezer are damaged.",
+      "matched_terms": [
+        "gasket"
+      ],
+      "inspection_id": "IR-1004",
+      "permit_id": "PR-2004",
+      "district": "va-chickahominy",
+      "source_name": "Virginia health inspection report"
+    },
+    {
+      "establishment_name": "River City Diner, 803 N Arthur Ashe Blvd",
+      "establishment_name_plain": "River City Diner",
+      "location_address": "803 N Arthur Ashe Blvd, Richmond, VA 23220",
+      "city": "Richmond",
+      "state": "VA",
+      "zip_code": "23220",
+      "industry": "Restaurant",
+      "signal_type": "health_inspection_violation",
+      "signal_date": "2026-11-09",
+      "source_url": "https://inspections.example.gov/va-richmond-city/report/IR-1005",
+      "signal_description": "Ice machine door gasket soiled and cracked.",
+      "matched_terms": [
+        "gasket"
+      ],
+      "inspection_id": "IR-1005",
+      "permit_id": "PR-2005",
+      "district": "va-richmond-city",
+      "source_name": "Virginia health inspection report"
+    },
+    {
+      "establishment_name": "Harbor Grill, 9 Waterside Dr",
+      "establishment_name_plain": "Harbor Grill",
+      "location_address": "9 Waterside Dr, Norfolk, VA 23510",
+      "city": "Norfolk",
+      "state": "VA",
+      "zip_code": "23510",
+      "industry": "Restaurant",
+      "signal_type": "health_inspection_violation",
+      "signal_date": "2026-11-03",
+      "source_url": "https://inspections.example.gov/va-norfolk/report/IR-1006",
+      "signal_description": "Cooler gasket torn.",
+      "matched_terms": [
+        "gasket"
+      ],
+      "inspection_id": "IR-1006",
+      "permit_id": "PR-2006",
+      "district": "va-norfolk",
+      "source_name": "Virginia health inspection report"
+    },
+    {
+      "establishment_name": "Carolina Smokehouse, 12 Fayetteville St",
+      "establishment_name_plain": "Carolina Smokehouse",
+      "location_address": "12 Fayetteville St, Raleigh, NC 27601",
+      "city": "Raleigh",
+      "state": "NC",
+      "zip_code": "27601",
+      "industry": "Restaurant",
+      "signal_type": "health_inspection_comment",
+      "signal_date": "2026-11-01",
+      "source_url": "https://inspections.example.gov/va-alleghany/report/IR-1007",
+      "signal_description": "replace the reach-in gasket before the next visit.",
+      "matched_terms": [
+        "gasket"
+      ],
+      "inspection_id": "IR-1007",
+      "permit_id": "PR-2007",
+      "district": "va-alleghany",
+      "source_name": "Virginia health inspection report"
+    },
+    {
+      "establishment_name": "Food Truck 7",
+      "establishment_name_plain": "Food Truck 7",
+      "location_address": "",
+      "city": "",
+      "state": "VA",
+      "zip_code": "",
+      "industry": "Mobile Food Unit",
+      "signal_type": "health_inspection_comment",
+      "signal_date": "2026-10-30",
+      "source_url": "https://inspections.example.gov/va-henrico/report/IR-1008",
+      "signal_description": "cold-holding unit gasket worn.",
+      "matched_terms": [
+        "gasket"
+      ],
+      "inspection_id": "IR-1008",
+      "permit_id": "PR-2008",
+      "district": "va-henrico",
+      "source_name": "Virginia health inspection report"
+    },
+    {
+      "establishment_name": "Fan District Cafe, 1700 W Main St",
+      "establishment_name_plain": "Fan District Cafe",
+      "location_address": "1700 W Main St, Richmond, VA 23220",
+      "city": "Richmond",
+      "state": "VA",
+      "zip_code": "23220",
+      "industry": "Restaurant",
+      "signal_type": "health_inspection_violation",
+      "signal_date": "2026-11-05",
+      "source_url": "https://inspections.example.gov/va-richmond-city/report/IR-1009",
+      "signal_description": "Walk-in freezer gasket damaged, ice build-up at the seal.",
+      "matched_terms": [
+        "gasket"
+      ],
+      "inspection_id": "IR-1009",
+      "permit_id": "PR-2009",
+      "district": "va-richmond-city",
+      "source_name": "Virginia health inspection report"
+    },
+    {
+      "establishment_name": "Waterside Oyster Bar, 333 Waterside Dr",
+      "establishment_name_plain": "Waterside Oyster Bar",
+      "location_address": "333 Waterside Dr",
+      "city": "",
+      "state": "VA",
+      "zip_code": "23510",
+      "industry": "Restaurant",
+      "signal_type": "health_inspection_violation",
+      "signal_date": "2026-11-07",
+      "source_url": "https://inspections.example.gov/va-norfolk/report/IR-1010",
+      "signal_description": "Reach-in cooler door gasket torn at the hinge side.",
+      "matched_terms": [
+        "gasket"
+      ],
+      "inspection_id": "IR-1010",
+      "permit_id": "PR-2010",
+      "district": "va-norfolk",
+      "source_name": "Virginia health inspection report"
+    }
+  ]
+}

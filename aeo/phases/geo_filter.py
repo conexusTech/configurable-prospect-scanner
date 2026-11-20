@@ -137,6 +137,38 @@ STRICTNESS_METRO = "metro"
 STRICTNESS_STATE = "state"
 
 
+def _locality(prospect: dict[str, Any]) -> tuple[str, str, str]:
+    """`(city, state, zip)` as the classifier compares them.
+
+    The city normalised, the state as two upper-case letters, and the ZIP from `zip_code`
+    or, failing that, the first one inside `address`. Empty strings where absent.
+    """
+    city = _norm_city(prospect.get("city"))
+    state = str(prospect.get("state") or "").strip().upper()[:2]
+    zip_code = ""
+    for field in ("zip_code", "address"):
+        match = _ZIP_RE.search(str(prospect.get(field) or ""))
+        if match:
+            zip_code = match.group(1)
+            break
+    return city, state, zip_code
+
+
+def placed_in_area(prospect: dict[str, Any], area: TargetArea) -> bool:
+    """True only on a POSITIVE placement: its ZIP is one of the area's, or its city is.
+
+    Stricter than `classify_prospect` under `metro`, which also admits a prospect whose
+    state matches when it has no city to judge. That reading suits a search, whose
+    candidate is verified afterwards; it does not suit a record whose address is all there
+    is, where "somewhere in Virginia" is not "in Richmond". A state alone, or a state with
+    a ZIP outside the area, places nothing.
+    """
+    if area.is_empty:
+        return False
+    city, _state, zip_code = _locality(prospect)
+    return bool(zip_code and zip_code in area.zips) or bool(city and city in area.cities)
+
+
 def classify_prospect(
     prospect: dict[str, Any], area: TargetArea, *, strictness: str = STRICTNESS_METRO
 ) -> str:
@@ -155,14 +187,7 @@ def classify_prospect(
     if area.is_empty:
         return UNKNOWN
 
-    city = _norm_city(prospect.get("city"))
-    state = str(prospect.get("state") or "").strip().upper()[:2]
-    zip_code = ""
-    for field in ("zip_code", "address"):
-        match = _ZIP_RE.search(str(prospect.get(field) or ""))
-        if match:
-            zip_code = match.group(1)
-            break
+    city, state, zip_code = _locality(prospect)
 
     if zip_code and zip_code in area.zips:
         return IN_AREA

@@ -1,5 +1,44 @@
 # OKF Log
 
+## 2026-11-19
+
+- **Update** — `sources-read-gateway-records` (Phase CRM-3, PRD J-7 and R-82; branch
+  `feature/CONE-0010-8-meriwether-crm`, not committed, not released). A discovery source carrying
+  `records: {feed, window_days}` reads its rows from the gateway
+  (`GET /runtime/organizations/:orgId/source-records?skill=&source=`, Basic auth, at most 500 rows
+  and 4 MB, both enforced) instead of being searched. `aeo/phases/source_records.py` keeps a row
+  only when its ZIP or city is the territory's under the default `metro` strictness (a state
+  alone places nothing; `geo_filter.placed_in_area`, and a metro territory of states alone is
+  refused), or when the classifier admits it under `state`; keeps one establishment per
+  normalised name (the newest finding by ISO date, an unreadable date counting as oldest; the rest
+  dropped with a WARNING, so "McDonald's" and "MCDONALDS" never merge); and assembles with the engine's
+  `_assemble_prospects`. The runner wraps that sweep in `capped_discover`, so held companies drop
+  before the ceiling. No discovery search and no address verification; a feed run pays for zip
+  discovery, judgment and contacts only. The company name is the `name_field` value
+  (`establishment_name`) as the gateway gives it: every row "<name>, <street>" (else the city; else
+  the plain name), shared name or not, so the collision handling is a safety net. ⚠️ So an org's
+  own listing is excluded, and a held company skipped, only under that same qualified name.
+  `config_mapping` refuses a skill mixing feed and
+  searched sources, and a feed skill authoring `validation` (lanes included). A run with no
+  territory, a gateway refusal or redirect, an unreachable gateway or a body cut short, an answer
+  for another feed, an unreadable or oversized answer, or rows none of which carries the
+  `name_field` stops with a named `source_records_*` error; gateway values echoed into errors and
+  logs are cut to 200 characters. A searched skill is proven unchanged against a recording of its
+  callbacks, call counts and prompt digests taken at `95d1eea` (`tests/fixtures/searched-run/`).
+  Capability `source-records`.
+
+- **Update** — 🔴 **No gateway call follows a redirect any more** (same change, from its security
+  review). urllib's default redirect handler copies `Authorization` onto the redirected request
+  whatever the new host, so a gateway redirect would have handed the Basic credentials to its
+  target. The context fetch, the records fetch and the event POST now share one opener whose
+  redirect handler refuses (`GatewayRedirectRefused`, an `HTTPError`, so existing handling
+  reports it); proven through the real opener chain with an in-process handler
+  (`tests/test_gateway_redirects.py`).
+
+- **Learning** — **The gateway half ships first, and the image re-pin before any feed skill is
+  connected**: an older image runs the feed's terms as a grounded search. The gateway half is
+  `aeo-backend`'s `scan-sources-read-gateway-feeds`.
+
 ## 2026-11-18
 
 - **Update** — `scanner-finds-up-to-three-contacts` (Phase CRM-2, PRD R-27.a; branch

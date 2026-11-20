@@ -33,6 +33,8 @@ import re
 
 from typing import Any
 
+from aeo.phases.source_records import feed_source_problems
+
 # Keys the engine requires on every entry of `sources`. `seed_firms` is optional —
 # upstream's own example ships sources with an empty list (municipal_permits,
 # planning_board), so requiring it would reject a legitimate config.
@@ -401,6 +403,11 @@ def build_tool_context(
                 problems.append(
                     f"`discovery.sources.{key}` is missing: {', '.join(missing)}."
                 )
+        # A source carrying `records` reads its rows from a gateway feed instead of
+        # searching (`aeo/phases/source_records.py`). A skill doing both, or a feed skill
+        # authoring `validation` (a paid call per prospect), is refused in v1, here,
+        # before a single provider call.
+        problems.extend(feed_source_problems(sources, validation=config.get("validation")))
 
     # ── scoring ────────────────────────────────────────────────────────────
     #

@@ -7,7 +7,9 @@ convenient behaviour silently loses or invents data.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
+import runner_harness as harness
 from aeo.phases.contacts import find_contacts, merge_into_scored
 from aeo.phases.validation import surviving_ids, validate_prospects
 
@@ -399,3 +401,111 @@ class TestValidationBatchingIsDormant:
         assert "a disqualifier that applies to one does not carry to the rest" in prompt
         # The per-prospect evidence standard survives batching — the §6 concern.
         assert "do not\nguess a value in order to judge it" in prompt
+
+
+# ── `sources-read-gateway-records`: whole runs, offline ──────────────────────────
+#
+# Driven through `aeo.runner.main()` by `runner_harness`, with the gateway, the queue
+# and the model all stubbed. These pin what a run SPENDS and SENDS, which no phase-level
+# test can see: a feed skill pays for no search, and a searched skill is untouched.
+
+
+#: Every phase that buys a grounded search to FIND or PLACE a prospect.
+_SEARCH_PHASES = ("discovery", "geography", "validation", "enrichment")
+
+
+class TestAFeedRunPaysForNoSearch:
+    """`no-search-spend`: a feed run makes no discovery, geography or validation call."""
+
+    def test_only_contacts_and_judgment_reach_the_model_beyond_the_area(self, monkeypatch):
+        run = harness.run_main(monkeypatch, harness.feed_context(), records=harness.feed_answer())
+        assert run.code == 0, run.error_message()
+        calls = run.provider.calls
+        for phase in _SEARCH_PHASES:
+            assert run.provider.count(phase) == 0, (phase, calls)
+        assert run.provider.count("contacts") >= 1
+        assert run.provider.count("judgment") >= 1
+        # Zip discovery is the territory's widening (one call per market), not a search
+        # for prospects; nothing else is paid for.
+        assert set(calls) == {"zip_discovery", "judgment", "contacts"}, calls
+        assert run.provider.count("zip_discovery") == 1
+
+    def test_the_gateway_is_read_once_for_the_feed_source(self, monkeypatch):
+        run = harness.run_main(monkeypatch, harness.feed_context(), records=harness.feed_answer())
+        assert run.record_requests == ["inspections"]
+
+    def test_the_run_reports_what_it_read(self, monkeypatch):
+        run = harness.run_main(monkeypatch, harness.feed_context(), records=harness.feed_answer())
+        [completed] = run.posted_of("completed")
+        summary = completed["summary"]
+        assert summary["total_prospects"] == 6
+        assert summary["total_validated"] == 0
+        assert summary["total_scored"] == 6
+        assert not run.posted_of("validations")
+
+    def test_the_finding_rides_on_the_prospect(self, monkeypatch):
+        run = harness.run_main(monkeypatch, harness.feed_context(), records=harness.feed_answer())
+        bella = next(i for i in run.items_of("prospects") if i["company_name"] == "Bella's Bistro, 100 E Cary St")
+        row = next(r for r in harness.feed_answer()["items"]
+                   if r["establishment_name"] == "Bella's Bistro, 100 E Cary St")
+        assert bella["discovery_data"]["by_source"]["inspections"] == row
+        assert (bella["city"], bella["state"], bella["zip_code"]) == ("Richmond", "VA", "23220")
+        assert bella["phase"] == "discover"
+
+
+class TestContactsAreFoundForFeedProspects:
+    """`contacts-found-for-feed-prospects`: each gets up to three people, as any prospect."""
+
+    def test_every_prospect_gets_three_people_and_the_first_fills_the_columns(self, monkeypatch):
+        run = harness.run_main(monkeypatch, harness.feed_context(), records=harness.feed_answer())
+        assert run.code == 0, run.error_message()
+        scored = run.items_of("scored")
+        prospect_names = {i["id"]: i["company_name"] for i in run.items_of("prospects")}
+        assert len(scored) == 6
+        for item in scored:
+            name = prospect_names[item["prospect_id"]]
+            assert len(item["contacts"]) == 3, name
+            first = item["contacts"][0]
+            assert first["name"] == f"Avery {name}"
+            assert item["contact_name"] == first["name"]
+            assert item["contact_title"] == first["title"] == "Owner"
+            assert item["contact_email"] == first["email"]
+
+    def test_six_prospects_are_one_contact_call(self, monkeypatch):
+        run = harness.run_main(monkeypatch, harness.feed_context(), records=harness.feed_answer())
+        assert run.provider.count("contacts") == 1
+
+    def test_the_contacts_ceiling_still_binds(self, monkeypatch):
+        ctx = harness.feed_context(config_contacts={"max_prospects": 2, "titles": ["Owner"]})
+        run = harness.run_main(monkeypatch, ctx, records=harness.feed_answer())
+        with_people = [i for i in run.items_of("scored") if i.get("contacts")]
+        assert len(with_people) == 2
+
+
+class TestASearchedSkillIsUnchanged:
+    """`searched-skills-unchanged`: a skill with no feed sends what it sent before feeds.
+
+    The expected callbacks were recorded from the scanner at 95d1eea, before this change,
+    by running the same fixture through the same harness.
+    """
+
+    GOLDEN = Path(__file__).parent / "fixtures" / "searched-run" / "wire-callbacks.json"
+
+    def test_the_same_callbacks_reach_the_gateway(self, monkeypatch):
+        golden = json.loads(self.GOLDEN.read_text())
+        run = harness.run_main(monkeypatch, harness.SEARCHED_CONTEXT)
+        assert run.code == golden["exit_code"] == 0
+        assert harness.wire_snapshot(run) == golden["callbacks"]
+
+    def test_the_same_model_calls_are_made(self, monkeypatch):
+        golden = json.loads(self.GOLDEN.read_text())
+        run = harness.run_main(monkeypatch, harness.SEARCHED_CONTEXT)
+        assert dict(sorted(run.provider.calls.items())) == golden["provider_calls"]
+        # The same prompts, too: a search sent with its market unbound costs the same
+        # number of calls and finds different firms.
+        assert harness.prompt_digests(run) == golden["provider_prompts"]
+
+    def test_a_searched_run_never_reads_the_gateway_feed(self, monkeypatch):
+        # The harness fails the run if it asks; the empty list says it never did.
+        run = harness.run_main(monkeypatch, harness.SEARCHED_CONTEXT)
+        assert run.record_requests == []

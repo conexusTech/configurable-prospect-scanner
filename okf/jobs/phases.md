@@ -14,7 +14,7 @@ In order:
 | Phase | Produces |
 |---|---|
 | ZIP discovery | validated ZIP rows per target market; may widen the org's markets when the config asks it to |
-| Discovery | deduplicated candidate companies, capped by the run's prospect ceiling and verified as genuinely in-area |
+| Discovery | deduplicated candidate companies, capped by the run's prospect ceiling and verified as genuinely in-area; for a skill whose sources name a gateway feed, the feed's rows in the territory instead, with no search — see below |
 | Validation | a per-prospect qualification verdict: qualified or not, signals found, disqualifiers hit, and the reasoning |
 | Enrichment lanes | additional authored fact passes, each differently shaped, stored per lane |
 | AI stage judgment | the sales-pipeline stage and its reasoning, replacing the engine's date-only ladder |
@@ -39,6 +39,43 @@ listed as a person. A person with no real name is not
 listed, and the same person twice is listed once. A business where nobody was found sends no
 list at all, never an empty one, so a later run cannot erase people an earlier one found. An
 answer in the older single-contact shape is still read, as one person, under the same rules.
+
+## A feed skill reads its prospects instead of searching
+
+A discovery source may name a feed the gateway already holds — health-inspection findings first
+— instead of being searched. Its `queries` are then the feed's terms, which the gateway reads from
+the stored skill, so nothing about them is sent or searched. The run asks the gateway once per
+feed source for the rows ([the gateway](/integrations/aeo-backend.md)) and keeps only the rows its
+own address places in the organization's territory: the same area, built from its markets and zip
+discovery's ZIPs, that a search is held to. **Under the default `metro` strictness the placement
+must be positive** — the row's ZIP is one of the area's ZIPs, or its city one of its cities (a ZIP
+inside the address counts). A matching state alone places nothing, though the classifier a search
+uses would admit it: a searched candidate is verified afterwards, a record's address is all there
+is. Under `geo_strictness: state` the classifier's answer stands. Each kept row becomes a prospect
+through the engine's own assembly, so ids and the exclusion of the organization's own listing are
+what a search would give. The row's non-empty values travel on the prospect, which is how the
+gateway shows it as the prospect's finding. Companies the organization already holds are dropped,
+then the prospect ceiling applies, exactly as for a search.
+
+Nothing is verified by a model, because the address is the state's record, and **a feed skill
+cannot author `validation`** (refused when its config is mapped: it would be a paid call per
+prospect). A feed run therefore pays only for zip discovery, the stage judgment and contacts, which
+run unchanged. **The gateway names every row "<name>, <street>"** (the address's first line;
+else the city; else the plain name alone), whether or not the name is shared, so every branch of a
+chain is its own prospect and a restaurant keeps one name in every answer; the company name is that
+name as given. As a safety net, two different establishments whose names still meet under the
+engine's name normalisation ("McDonald's, 5 E Main St", "MCDONALDS, 5 E MAIN ST") are never
+merged: the newest finding, by date (a date that is not an ISO date string counts as oldest), is
+kept and the run logs a warning. ⚠️ Because the name carries the street, an organization's own
+listing is excluded, and a company it already holds is skipped, only when it holds that same
+"<name>, <street>" form.
+
+A skill mixing feed and searched sources is refused when its config is mapped. A run with no
+territory to hold the rows to — including, under metro, markets that give only states and no
+city or ZIP — a gateway that refuses, redirects or cannot be reached, or an answer this scanner
+cannot read (more than 500 rows or 4 MB among them) stops with a named error (`source_records_*`)
+rather than reporting an empty week. See
+[capabilities/source-records](/capabilities/source-records.md).
 
 ## Geography is enforced, not requested
 

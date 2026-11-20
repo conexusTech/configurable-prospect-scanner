@@ -38,11 +38,12 @@ Env (all injected by the queue in a real run):
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -83,6 +84,13 @@ from aeo.phases.query_expansion import (  # noqa: E402
 )
 from aeo.phases.ai_judgment import judge_prospects
 from aeo.phases.score_explanation import attach_explanations, explain_scores
+from aeo.phases.source_records import (
+    ECHO_LIMIT,
+    SourceRecordsError,
+    clip,
+    feed_sources,
+    records_sweep,
+)
 from aeo.phases.enrichment import (  # noqa: E402
     constrain_signal_lane,
     enrich_prospects,
@@ -150,6 +158,65 @@ def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Basic {token}"}
 
 
+class GatewayRedirectRefused(HTTPError):
+    """The gateway answered a redirect, and it was not followed.
+
+    An `HTTPError` with the 3xx code, so every existing `except HTTPError` path reports
+    it as the failed call it is.
+    """
+
+
+class _NeverRedirect(urlrequest.HTTPRedirectHandler):
+    """Refuses every redirect instead of following it.
+
+    🔴 urllib's own handler copies the request's headers onto the redirected request —
+    `Authorization` included, whatever the new host — so following a redirect from the
+    gateway would hand the scanner's Basic credentials to wherever it pointed.
+    """
+
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> None:
+        raise GatewayRedirectRefused(
+            req.full_url,
+            code,
+            f"redirect to {clip(newurl)} refused: gateway calls never follow a redirect",
+            headers,
+            fp,
+        )
+
+
+def _gateway_opener() -> urlrequest.OpenerDirector:
+    """An opener like `urlopen`'s, except that it never follows a redirect."""
+    return urlrequest.build_opener(_NeverRedirect)
+
+
+#: The one opener every gateway call goes through: the context fetch, the source-records
+#: fetch and the event POST. All three carry the Basic credentials.
+_GATEWAY_OPENER = _gateway_opener()
+
+#: Most bytes read from one source-records answer. 500 rows of the contract fixture's
+#: widest row are under 1 MB; anything larger is not an answer this scanner reads.
+_MAX_RECORDS_BYTES = 4 * 1024 * 1024
+
+
+def _open_gateway(req: urlrequest.Request) -> Any:
+    return _GATEWAY_OPENER.open(req, timeout=30)
+
+
+def _http_error_detail(exc: HTTPError, limit: int) -> str:
+    """The body of an HTTP error response, its first `limit` characters, or "".
+
+    The gateway puts the reason in the body. Reading it must never replace the error
+    being reported, so a failure to read it yields "". A plain slice, as the event POST
+    always cut it, so that log line is unchanged.
+    """
+    try:
+        return exc.read().decode("utf-8", "replace")[:limit]
+    except Exception:  # diagnostics must never mask the error they describe
+        return ""
+
+
 def fetch_context(backend_url: str, org_id: str, skill_slug: str) -> dict[str, Any]:
     """GET the org's runtime context for a specific skill.
 
@@ -164,8 +231,59 @@ def fetch_context(backend_url: str, org_id: str, skill_slug: str) -> dict[str, A
     query = urlencode({"skill": skill_slug})
     url = f"{backend_url.rstrip('/')}/runtime/organizations/{org_id}/context?{query}"
     req = urlrequest.Request(url, headers=_auth_headers(), method="GET")
-    with urlrequest.urlopen(req, timeout=30) as resp:
+    with _open_gateway(req) as resp:
         return json.loads(resp.read().decode())
+
+
+def fetch_source_records(
+    backend_url: str, org_id: str, skill_slug: str, source: str
+) -> dict[str, Any]:
+    """GET one feed source's rows: `{feed, terms, since, total, truncated, items}`.
+
+    Same route family, auth and timeout as `fetch_context`. Only the skill and the
+    source name are sent: the gateway reads the feed, its terms and its window from the
+    stored skill config, so this call cannot widen the question it answers.
+
+    Every failure is a `SourceRecordsError` with a stable reason, carrying the gateway's
+    own words when it gave any — an unknown feed and an unknown organization are both
+    the gateway's refusal, and only its message says which. A redirect is never followed
+    (`_NeverRedirect`) and is its own reason. The read is bounded.
+    """
+    query = urlencode({"skill": skill_slug, "source": source})
+    url = f"{backend_url.rstrip('/')}/runtime/organizations/{org_id}/source-records?{query}"
+    req = urlrequest.Request(url, headers=_auth_headers(), method="GET")
+    try:
+        with _open_gateway(req) as resp:
+            raw = resp.read(_MAX_RECORDS_BYTES + 1)
+    except HTTPError as exc:
+        # Cut like every gateway value this run echoes: it lands in the run's error.
+        detail = _http_error_detail(exc, ECHO_LIMIT)
+        redirected = 300 <= exc.code < 400
+        raise SourceRecordsError(
+            "source_records_redirected" if redirected else "source_records_refused",
+            f"the gateway {'redirected' if redirected else 'refused'} source {source!r}: "
+            f"HTTP {exc.code} {clip(exc.reason)}" + (f" :: {detail}" if detail else ""),
+        ) from exc
+    except (OSError, http.client.HTTPException) as exc:
+        # URLError, a timeout, a reset connection, or a body cut short mid-read.
+        raise SourceRecordsError(
+            "source_records_unreachable",
+            f"could not read source {source!r} from the gateway: {clip(exc)}",
+        ) from exc
+    if len(raw) > _MAX_RECORDS_BYTES:
+        raise SourceRecordsError(
+            "source_records_malformed",
+            f"the gateway's answer for source {source!r} is larger than "
+            f"{_MAX_RECORDS_BYTES} bytes",
+        )
+    body = raw.decode("utf-8", "replace")
+    try:
+        return json.loads(body)
+    except ValueError as exc:
+        raise SourceRecordsError(
+            "source_records_malformed",
+            f"the gateway's answer for source {source!r} is not JSON",
+        ) from exc
 
 
 def post_event(
@@ -198,7 +316,7 @@ def post_event(
     headers = {"Content-Type": "application/json", **_auth_headers()}
     req = urlrequest.Request(url, data=body, headers=headers, method="POST")
     try:
-        with urlrequest.urlopen(req, timeout=30) as resp:
+        with _open_gateway(req) as resp:
             resp.read()
     except HTTPError as exc:
         # An HTTPError IS the response, and AEO puts the field-level reason in its body:
@@ -214,11 +332,10 @@ def post_event(
         # Logged and re-raised UNCHANGED: callers catch HTTPError specifically
         # (`except (HTTPError, URLError, ValueError)`), so converting the type here would
         # route the failure somewhere else while pretending to improve reporting.
-        detail = ""
-        try:
-            detail = exc.read().decode("utf-8", "replace")[:800]
-        except Exception:  # noqa: BLE001 -- diagnostics must never mask the error
-            pass
+        #
+        # 800, not the 200 every other echo is cut to: this goes only to the container
+        # log, and the field-level detail is the whole diagnosis.
+        detail = _http_error_detail(exc, 800)
         _log(
             f"callback rejected: {event_type} -> HTTP {exc.code} {exc.reason}"
             + (f" :: {detail}" if detail else " :: (empty body)")
@@ -858,6 +975,11 @@ def main() -> int:
 
     config = (aeo_context.get("skill") or {}).get("config") or {}
 
+    # Sources that read a gateway feed instead of searching (`sources-read-gateway-
+    # records`). `build_tool_context` has already refused a skill mixing the two kinds, so
+    # this is every source of the skill or none of them.
+    record_sources = feed_sources(tool_context["sources"])
+
     # Declared up front: geographic enforcement reads this whether or not Phase 0 ran.
     zip_rows: list[dict[str, Any]] = []
 
@@ -955,33 +1077,47 @@ def main() -> int:
             .get("geo_strictness", STRICTNESS_METRO)
         )
 
-        # THE ROOT CAUSE OF THE DRIFT, fixed here. The engine hands `queries` to the
-        # model verbatim and never substitutes `{market}` — it does not read
-        # `organization.markets` during discovery at all. So an authored query reached
-        # the model with the placeholder intact, carrying no geography, and the model
-        # answered with the state's most prominent firms. Expanding it is ours to do
-        # because the markets are not known until zip discovery has run.
-        tool_context["sources"] = expand_queries(
-            tool_context["sources"],
-            markets,
-            max_per_source=int(
-                (config.get("geography") or {})
-                .get("targeting", {})
-                .get("max_queries_per_source", DEFAULT_MAX_QUERIES_PER_SOURCE)
-            ),
-        )
-        stragglers = unexpanded_placeholders(tool_context["sources"])
-        if stragglers:
-            # A query reaching the model with `{market}` in it returns confident,
-            # well-formed, geographically random results — the most expensive failure
-            # this repo has seen. Say so loudly rather than searching anyway.
+        if record_sources:
+            # A feed source's `queries` are the feed's terms, which the gateway reads from
+            # the stored skill. There is no `{market}` to bind and nothing is searched.
             _log(
-                f"WARNING: {len(stragglers)} query/queries still contain "
-                f"{MARKET_PLACEHOLDER} and will carry NO geography: {stragglers[0]}"
+                "reading prospects from the gateway's records for source(s) "
+                f"{', '.join(record_sources)}: no discovery search, no address "
+                f"verification; rows are held to {area.describe()}"
             )
         else:
-            total = sum(len(s.get("queries") or []) for s in tool_context["sources"].values())
-            _log(f"expanded to {total} geo-anchored query/queries across {len(markets)} market(s)")
+            # THE ROOT CAUSE OF THE DRIFT, fixed here. The engine hands `queries` to the
+            # model verbatim and never substitutes `{market}` — it does not read
+            # `organization.markets` during discovery at all. So an authored query
+            # reached the model with the placeholder intact, carrying no geography, and
+            # the model answered with the state's most prominent firms. Expanding it is
+            # ours to do because the markets are not known until zip discovery has run.
+            tool_context["sources"] = expand_queries(
+                tool_context["sources"],
+                markets,
+                max_per_source=int(
+                    (config.get("geography") or {})
+                    .get("targeting", {})
+                    .get("max_queries_per_source", DEFAULT_MAX_QUERIES_PER_SOURCE)
+                ),
+            )
+            stragglers = unexpanded_placeholders(tool_context["sources"])
+            if stragglers:
+                # A query reaching the model with `{market}` in it returns confident,
+                # well-formed, geographically random results — the most expensive
+                # failure this repo has seen. Say so loudly rather than searching anyway.
+                _log(
+                    f"WARNING: {len(stragglers)} query/queries still contain "
+                    f"{MARKET_PLACEHOLDER} and will carry NO geography: {stragglers[0]}"
+                )
+            else:
+                total = sum(
+                    len(s.get("queries") or []) for s in tool_context["sources"].values()
+                )
+                _log(
+                    f"expanded to {total} geo-anchored query/queries across "
+                    f"{len(markets)} market(s)"
+                )
 
         # The run's prospect ceiling. Cumulative across rounds, applied before any
         # prospect becomes durable — see aeo/phases/prospect_budget.py for why it
@@ -998,33 +1134,73 @@ def main() -> int:
                 f"prospect ceiling: {budget.remaining} for this run ({ceiling_reason})"
             )
 
-        # `emit` is threaded through rather than closed over, because the ceiling has
-        # to intercept the engine's `prospects` event before it reaches the sink.
-        _discover = capped_discover(
-            lambda ctx, emit: als.discover(
+        # Companies this org already holds, so a duplicate is dropped BEFORE the
+        # ceiling rather than after the run has paid to discover, verify and enrich it.
+        # Normalised here with the same helper the filter uses, so a gateway that has
+        # not shipped the field yet simply yields an empty set and the run behaves
+        # exactly as before. A feed run is held to the same list in the same place.
+        known_companies = {
+            normalize_company(n)
+            for n in (aeo_context.get("known_companies") or [])
+            if normalize_company(n)
+        }
+
+        def _search(
+            ctx: dict[str, Any], emit: Callable[[dict[str, Any]], None]
+        ) -> list[dict[str, Any]]:
+            return als.discover(
                 ctx,
                 scan_run_id=scan_run_id,
                 provider=provider,
                 emit=emit,
                 provider_config=provider_config,
-            ),
+            )
+
+        def _assemble(
+            groups: dict[str, list[dict[str, Any]]], ctx: dict[str, Any]
+        ) -> list[dict[str, Any]]:
+            # The engine's own assembly, as `als.discover` calls it: the same ids, the
+            # org's own listing excluded, each row kept in `discovery_data.by_source`.
+            return als._assemble_prospects(
+                groups=groups,
+                scan_run_id=scan_run_id,
+                canonical=als.canonical_fields_from_sources(ctx.get("sources")),
+                excluded_names=als.excluded_prospect_names(ctx),
+                log=_log,
+            )
+
+        sweep = (
+            records_sweep(
+                record_sources,
+                fetch=lambda source: fetch_source_records(
+                    backend_url, org_id, skill_slug, source
+                ),
+                area=area,
+                strictness=strictness,
+                normalize=als.normalize_name,
+                assemble=_assemble,
+                log=_log,
+            )
+            if record_sources
+            else _search
+        )
+
+        # `emit` is threaded through rather than closed over, because the ceiling has
+        # to intercept the sweep's `prospects` event before it reaches the sink.
+        _discover = capped_discover(
+            sweep,
             budget=budget,
             emit=sink.emit,
             log=_log,
-            # Companies this org already holds, so a duplicate is dropped BEFORE the
-            # ceiling rather than after the run has paid to discover, verify and
-            # enrich it. Normalised here with the same helper the filter uses, so a
-            # gateway that has not shipped the field yet simply yields an empty set
-            # and the run behaves exactly as before.
-            known_companies={
-                normalize_company(n)
-                for n in (aeo_context.get("known_companies") or [])
-                if normalize_company(n)
-            },
+            known_companies=known_companies,
         )
 
         geo_rejects: list[dict[str, Any]] = []
-        if area.is_empty:
+        if record_sources:
+            # One read, no rounds and no verification: the rows carry the state's own
+            # address and were held to the territory as they were read.
+            prospects = _discover(tool_context)
+        elif area.is_empty:
             # Enforcement off: an empty area would reject everything, which is worse
             # than not enforcing. One plain pass.
             _log("geography unknown — verify loop skipped (would reject everything)")
@@ -1375,10 +1551,16 @@ def main() -> int:
                 },
             }
         )
-    except als.ScanAbort as exc:
+    except (als.ScanAbort, SourceRecordsError) as exc:
         # A known, named failure mode. The reason code is prefixed onto the message
         # because `scan_runs.error` is free text and free text is why this class of
         # outage was invisible: consumers match the stable prefix, not the prose.
+        #
+        # `SourceRecordsError` is a feed run that cannot go on: no territory to hold the
+        # rows to, a gateway that refused, redirected or could not be reached, or an
+        # answer this scanner cannot read. It carries a `reason` exactly as `ScanAbort`
+        # does, and is not its subclass only because that would import the engine into
+        # `aeo/phases/`, which stays reachable without it.
         sink.emit_safe({"type": "error", "message": f"{exc.reason}: {exc}"})
         _log(f"run failed ({exc.reason}): {exc}")
         return 1

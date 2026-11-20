@@ -1,0 +1,478 @@
+{
+  "_comment": "GENERATED from the scanner at 95d1eea, before feed sources existed: the wire callbacks of tests/runner_harness.py SEARCHED_CONTEXT run with its StubProvider. test_phases.py asserts a searched skill still produces exactly these. Do not regenerate to make that test pass.",
+  "callbacks": [
+    {
+      "payload": {
+        "data": [
+          {
+            "city": "Mechanicsville",
+            "discovery_method": "llm_grounded",
+            "state": "VA",
+            "zip_code": "23111"
+          },
+          {
+            "city": "Richmond",
+            "discovery_method": "llm_grounded",
+            "state": "VA",
+            "zip_code": "23220"
+          }
+        ]
+      },
+      "type": "zip_codes"
+    },
+    {
+      "payload": {
+        "data": [
+          {
+            "address": "1 Main St, Richmond, VA 23220",
+            "city": "Richmond",
+            "company_name": "Restaurants One",
+            "discovery_data": {
+              "by_source": {
+                "restaurants": {
+                  "city": "Richmond",
+                  "company_name": "Restaurants One",
+                  "location_address": "1 Main St, Richmond, VA 23220",
+                  "search_query": "restaurants in Richmond, VA",
+                  "state": "VA",
+                  "zip_code": "23220"
+                }
+              },
+              "source_count": 1,
+              "sources_found_in": [
+                "restaurants"
+              ]
+            },
+            "id": "64030a96-3526-580f-86dc-6eb25c7d0a6a",
+            "phase": "discover",
+            "phase_name": "Discovery sweep",
+            "sources": "restaurants",
+            "state": "VA",
+            "zip_code": "23220"
+          },
+          {
+            "address": "9 Bay St, Norfolk, VA 23510",
+            "city": "Norfolk",
+            "company_name": "Diners Far",
+            "discovery_data": {
+              "by_source": {
+                "restaurants": {
+                  "city": "Norfolk",
+                  "company_name": "Diners Far",
+                  "location_address": "9 Bay St, Norfolk, VA 23510",
+                  "search_query": "diners in Richmond, VA",
+                  "state": "VA",
+                  "zip_code": "23510"
+                }
+              },
+              "source_count": 1,
+              "sources_found_in": [
+                "restaurants"
+              ]
+            },
+            "id": "7827f91e-90d9-5c0b-bc3d-66506f6036fd",
+            "phase": "discover",
+            "phase_name": "Discovery sweep",
+            "sources": "restaurants",
+            "state": "VA",
+            "zip_code": "23510"
+          },
+          {
+            "address": "9 Bay St, Norfolk, VA 23510",
+            "city": "Norfolk",
+            "company_name": "Restaurants Far",
+            "discovery_data": {
+              "by_source": {
+                "restaurants": {
+                  "city": "Norfolk",
+                  "company_name": "Restaurants Far",
+                  "location_address": "9 Bay St, Norfolk, VA 23510",
+                  "search_query": "restaurants in Richmond, VA",
+                  "state": "VA",
+                  "zip_code": "23510"
+                }
+              },
+              "source_count": 1,
+              "sources_found_in": [
+                "restaurants"
+              ]
+            },
+            "id": "7d158dff-1aee-5fe2-a953-26c264aefc67",
+            "phase": "discover",
+            "phase_name": "Discovery sweep",
+            "sources": "restaurants",
+            "state": "VA",
+            "zip_code": "23510"
+          },
+          {
+            "address": "2 Main St, Richmond, VA 23220",
+            "city": "Richmond",
+            "company_name": "Restaurants Two",
+            "discovery_data": {
+              "by_source": {
+                "restaurants": {
+                  "city": "Richmond",
+                  "company_name": "Restaurants Two",
+                  "location_address": "2 Main St, Richmond, VA 23220",
+                  "search_query": "restaurants in Richmond, VA",
+                  "state": "VA",
+                  "zip_code": "23220"
+                }
+              },
+              "source_count": 1,
+              "sources_found_in": [
+                "restaurants"
+              ]
+            },
+            "id": "c42947df-aafd-560e-8eba-830bac8ecd18",
+            "phase": "discover",
+            "phase_name": "Discovery sweep",
+            "sources": "restaurants",
+            "state": "VA",
+            "zip_code": "23220"
+          },
+          {
+            "address": "1 Main St, Richmond, VA 23220",
+            "city": "Richmond",
+            "company_name": "Diners One",
+            "discovery_data": {
+              "by_source": {
+                "restaurants": {
+                  "city": "Richmond",
+                  "company_name": "Diners One",
+                  "location_address": "1 Main St, Richmond, VA 23220",
+                  "search_query": "diners in Richmond, VA",
+                  "state": "VA",
+                  "zip_code": "23220"
+                }
+              },
+              "source_count": 1,
+              "sources_found_in": [
+                "restaurants"
+              ]
+            },
+            "id": "d85882cf-9157-5177-993d-4b4374046dad",
+            "phase": "discover",
+            "phase_name": "Discovery sweep",
+            "sources": "restaurants",
+            "state": "VA",
+            "zip_code": "23220"
+          }
+        ]
+      },
+      "type": "prospects"
+    },
+    {
+      "payload": {
+        "data": [
+          {
+            "prospect_id": "64030a96-3526-580f-86dc-6eb25c7d0a6a",
+            "validation_data": {
+              "disqualifiers_hit": [],
+              "reasoning": "stub",
+              "signals_found": [
+                {
+                  "signal_description": "walk-in cooler"
+                }
+              ],
+              "validated": true
+            }
+          },
+          {
+            "prospect_id": "7827f91e-90d9-5c0b-bc3d-66506f6036fd",
+            "validation_data": {
+              "disqualifiers_hit": [
+                "outside the target geography"
+              ],
+              "reasoning": "Address verified as Norfolk, VA, outside the scan's target area (2 city/cities; states VA; 2 zip(s)).",
+              "signals_found": [],
+              "validated": false,
+              "verified_location": {
+                "city": "Norfolk",
+                "confidence": "high",
+                "source_url": "https://example.org/a",
+                "state": "VA",
+                "zip_code": "23510"
+              }
+            }
+          },
+          {
+            "prospect_id": "7d158dff-1aee-5fe2-a953-26c264aefc67",
+            "validation_data": {
+              "disqualifiers_hit": [
+                "outside the target geography"
+              ],
+              "reasoning": "Address verified as Norfolk, VA, outside the scan's target area (2 city/cities; states VA; 2 zip(s)).",
+              "signals_found": [],
+              "validated": false,
+              "verified_location": {
+                "city": "Norfolk",
+                "confidence": "high",
+                "source_url": "https://example.org/a",
+                "state": "VA",
+                "zip_code": "23510"
+              }
+            }
+          },
+          {
+            "prospect_id": "c42947df-aafd-560e-8eba-830bac8ecd18",
+            "validation_data": {
+              "disqualifiers_hit": [],
+              "reasoning": "stub",
+              "signals_found": [
+                {
+                  "signal_description": "walk-in cooler"
+                }
+              ],
+              "validated": true
+            }
+          },
+          {
+            "prospect_id": "d85882cf-9157-5177-993d-4b4374046dad",
+            "validation_data": {
+              "disqualifiers_hit": [],
+              "reasoning": "stub",
+              "signals_found": [
+                {
+                  "signal_description": "walk-in cooler"
+                }
+              ],
+              "validated": true
+            }
+          }
+        ]
+      },
+      "type": "validations"
+    },
+    {
+      "payload": {
+        "data": [
+          {
+            "ai_score_adjustment": 0,
+            "city": "Richmond",
+            "contact_email": "avery@restaurantsone.example",
+            "contact_name": "Avery Restaurants One",
+            "contact_title": "Owner",
+            "contacts": [
+              {
+                "confidence": "high",
+                "email": "avery@restaurantsone.example",
+                "name": "Avery Restaurants One",
+                "source_url": "https://restaurantsone.example/team",
+                "title": "Owner"
+              },
+              {
+                "confidence": "high",
+                "email": "blake@restaurantsone.example",
+                "name": "Blake Restaurants One",
+                "source_url": "https://restaurantsone.example/team",
+                "title": "General Manager"
+              },
+              {
+                "confidence": "high",
+                "email": "casey@restaurantsone.example",
+                "name": "Casey Restaurants One",
+                "source_url": "https://restaurantsone.example/team",
+                "title": "Kitchen Manager"
+              }
+            ],
+            "contacts_data": {
+              "company_name": "Restaurants One",
+              "confidence": "high",
+              "n": "2",
+              "source_url": "https://restaurantsone.example/team"
+            },
+            "prospect_id": "64030a96-3526-580f-86dc-6eb25c7d0a6a",
+            "rank": 2,
+            "score": 41,
+            "score_factors": {
+              "completeness": 11,
+              "fit": 0,
+              "is_region": true,
+              "multi_source": 0,
+              "pipeline_timing": 20,
+              "region_bonus": 10
+            },
+            "scoring_payload": {
+              "pipeline_source": "derived",
+              "pipeline_status": "1 - Early Discovery"
+            },
+            "state": "VA",
+            "zip_code": "23220"
+          },
+          {
+            "ai_score_adjustment": 0,
+            "city": "Richmond",
+            "contact_email": "avery@restaurantstwo.example",
+            "contact_name": "Avery Restaurants Two",
+            "contact_title": "Owner",
+            "contacts": [
+              {
+                "confidence": "high",
+                "email": "avery@restaurantstwo.example",
+                "name": "Avery Restaurants Two",
+                "source_url": "https://restaurantstwo.example/team",
+                "title": "Owner"
+              },
+              {
+                "confidence": "high",
+                "email": "blake@restaurantstwo.example",
+                "name": "Blake Restaurants Two",
+                "source_url": "https://restaurantstwo.example/team",
+                "title": "General Manager"
+              },
+              {
+                "confidence": "high",
+                "email": "casey@restaurantstwo.example",
+                "name": "Casey Restaurants Two",
+                "source_url": "https://restaurantstwo.example/team",
+                "title": "Kitchen Manager"
+              }
+            ],
+            "contacts_data": {
+              "company_name": "Restaurants Two",
+              "confidence": "high",
+              "n": "3",
+              "source_url": "https://restaurantstwo.example/team"
+            },
+            "prospect_id": "c42947df-aafd-560e-8eba-830bac8ecd18",
+            "rank": 3,
+            "score": 41,
+            "score_factors": {
+              "completeness": 11,
+              "fit": 0,
+              "is_region": true,
+              "multi_source": 0,
+              "pipeline_timing": 20,
+              "region_bonus": 10
+            },
+            "scoring_payload": {
+              "pipeline_source": "derived",
+              "pipeline_status": "1 - Early Discovery"
+            },
+            "state": "VA",
+            "zip_code": "23220"
+          },
+          {
+            "ai_score_adjustment": 0,
+            "city": "Richmond",
+            "contact_email": "avery@dinersone.example",
+            "contact_name": "Avery Diners One",
+            "contact_title": "Owner",
+            "contacts": [
+              {
+                "confidence": "high",
+                "email": "avery@dinersone.example",
+                "name": "Avery Diners One",
+                "source_url": "https://dinersone.example/team",
+                "title": "Owner"
+              },
+              {
+                "confidence": "high",
+                "email": "blake@dinersone.example",
+                "name": "Blake Diners One",
+                "source_url": "https://dinersone.example/team",
+                "title": "General Manager"
+              },
+              {
+                "confidence": "high",
+                "email": "casey@dinersone.example",
+                "name": "Casey Diners One",
+                "source_url": "https://dinersone.example/team",
+                "title": "Kitchen Manager"
+              }
+            ],
+            "contacts_data": {
+              "company_name": "Diners One",
+              "confidence": "high",
+              "n": "1",
+              "source_url": "https://dinersone.example/team"
+            },
+            "prospect_id": "d85882cf-9157-5177-993d-4b4374046dad",
+            "rank": 1,
+            "score": 41,
+            "score_factors": {
+              "completeness": 11,
+              "fit": 0,
+              "is_region": true,
+              "multi_source": 0,
+              "pipeline_timing": 20,
+              "region_bonus": 10
+            },
+            "scoring_payload": {
+              "pipeline_source": "derived",
+              "pipeline_status": "1 - Early Discovery"
+            },
+            "state": "VA",
+            "zip_code": "23220"
+          }
+        ],
+        "stage_resolver": "scanner"
+      },
+      "type": "scored"
+    },
+    {
+      "payload": {
+        "summary": {
+          "cost": {
+            "by_model": [],
+            "by_phase": [],
+            "cached_input_tokens": 0,
+            "calls": 0,
+            "failed_calls": 0,
+            "grounded_requests": 0,
+            "grounded_search_queries": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "search_histogram": {},
+            "thinking_tokens": 0,
+            "unpriced_calls": 0
+          },
+          "total_prospects": 5,
+          "total_scored": 3,
+          "total_validated": 3,
+          "total_zips": 2
+        }
+      },
+      "type": "completed"
+    }
+  ],
+  "exit_code": 0,
+  "provider_calls": {
+    "contacts": 1,
+    "discovery": 2,
+    "geography": 5,
+    "judgment": 3,
+    "validation": 3,
+    "zip_discovery": 1
+  },
+  "provider_prompts": {
+    "contacts": [
+      "b87c9eb08d518a42dcd29003d8327895d078573f59186a9d1a9c8e75e5a83c47"
+    ],
+    "discovery": [
+      "ec10de1b1012a27c375140fe68e3b21bdaa682941ae6febad1cde228ab6ebe90",
+      "fe088bdf39a5a24c563df4789d8fbe6a56e9bf8c0928f07f799991892264fd58"
+    ],
+    "geography": [
+      "17e175f18be922171369b72ee681a61c13abf1bdec8f8ea166166a69a0113b8c",
+      "421604893d6f37b6b85af09dbe5cbb637cac9a4b117c3c6da7d62c880cb1deba",
+      "66d75b492b2ca1cdb123bad5335fc8be8740134813dc117f5a29e16645ae04f1",
+      "8a6e2a53fb5fa78a5c6fec6bd1a5646023fc524ec45d4f566777e94252eef379",
+      "e92e0a718cc80599392ec1a209e0a6022ef80f159bf8b186466ff67cac4f8d4e"
+    ],
+    "judgment": [
+      "69b7de120a79a9ee56d3a36e3f9984b9fada40dba732d33375b0e707d4c61bb4",
+      "8a68f6e9756793b45bb358fe30433f186b9ee3d70bc9a8359111ab561151eea5",
+      "b8bc8672de00d30f94543c7a81707b97d6e14302235ec04fdb77313dd3515285"
+    ],
+    "validation": [
+      "29b2991fc91a9585a44d97f39178fe72e1a2e524eb84ad9a07567373e8e0912d",
+      "8f360131a6ac175eeac69bffaf927873bf4cb68851adbd399c46c74acd847f92",
+      "da61336897c90a228818045b35346c4d865a7cbbd177b6be8b5704ad2183dcca"
+    ],
+    "zip_discovery": [
+      "8fef8de4c84dcbb444e3313982fb884eee40cc27bc879c7acce0380fbc78e1e8"
+    ]
+  }
+}
